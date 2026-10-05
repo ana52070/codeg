@@ -44,10 +44,14 @@ function subscribeQuota(agentType: string, callback: () => void) {
   }
 }
 
+type QuotaTranslator = ReturnType<
+  typeof useTranslations<"Folder.statusBar.quota">
+>
+
 function formatCountdown(
   resetInSeconds: number | null | undefined,
   resetsAt: string | null | undefined,
-  t: any
+  t: QuotaTranslator
 ): string | null {
   let seconds = resetInSeconds
   if (seconds == null && resetsAt) {
