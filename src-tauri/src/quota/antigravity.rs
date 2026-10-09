@@ -185,12 +185,7 @@ fn resolve_antigravity_token_path() -> Option<PathBuf> {
         home.join(".gemini").join("antigravity-cli").join("acp_token.json"),
     ];
 
-    for path in candidates {
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
+    candidates.into_iter().find(|path| path.exists())
 }
 
 /// Obtains a valid Google OAuth access token, refreshing if necessary.
@@ -354,7 +349,7 @@ pub async fn fetch_antigravity_quota() -> Result<AgentQuotaInfo, String> {
                     let label = bucket
                         .display_name
                         .as_deref()
-                        .unwrap_or_else(|| match bucket.window.as_deref() {
+                        .unwrap_or(match bucket.window.as_deref() {
                             Some("5h") => "Gemini 5-Hour Window",
                             Some("weekly") => "Gemini Weekly Limit",
                             _ => "Quota Window",
