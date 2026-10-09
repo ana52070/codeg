@@ -382,6 +382,21 @@ pub struct SessionState {
     ///
     /// Backend-internal — not serialized, not carried on `to_snapshot()`.
     pub asserted_config_values: BTreeMap<String, String>,
+    /// Each config option's value as the agent itself picked it for this
+    /// session: the establishment's own answer (or the picker Grok's handshake
+    /// yields), read BEFORE codeg replays any saved preference over it.
+    /// Rewritten by every establishment, whether or not it had preferences to
+    /// replay.
+    ///
+    /// Only the options probe reads it (`ConnectionManager::probe_agent_options`).
+    /// The probe applies the caller's model so that options the agent derives
+    /// from it — opencode re-lists `effort` per model — answer for that model.
+    /// `config_options` then holds the caller's own model as the current one,
+    /// while what the probe must report for an applied option is what it runs
+    /// when left unset: the agent's default, kept here.
+    ///
+    /// Backend-internal — not serialized, not carried on `to_snapshot()`.
+    pub agent_chosen_config_values: BTreeMap<String, String>,
     /// Config-option ids this launch pinned through the environment, which the
     /// agent will therefore refuse to change for as long as the process lives.
     ///
@@ -708,6 +723,7 @@ impl SessionState {
             grok_catalog_broadcast: None,
             pi_startup_banner: None,
             asserted_config_values: BTreeMap::new(),
+            agent_chosen_config_values: BTreeMap::new(),
             env_pinned_config_option_ids: Vec::new(),
             prompt_capabilities: None,
             fork_supported: false,

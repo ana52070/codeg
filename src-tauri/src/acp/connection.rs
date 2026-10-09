@@ -4556,6 +4556,11 @@ async fn apply_and_emit_session_config_options(
             // session birth, and on a catalog broadcast). `None` when empty
             // keeps the switch path on the flat-fallback branch.
             state.write().await.grok_model_specs = (!specs.is_empty()).then(|| specs.clone());
+            // Grok's picker comes from its handshake, not a config-option list:
+            // its values are what the agent picked on its own, read before the
+            // replay below rewrites them (see
+            // `SessionState::agent_chosen_config_values`).
+            state.write().await.agent_chosen_config_values = current_config_option_values(&opts);
             let session_id = session.session_id().clone();
             apply_grok_preferred_options(
                 cx,
@@ -4571,6 +4576,10 @@ async fn apply_and_emit_session_config_options(
         // No x.ai/sessionConfig (unexpected): fall through to the standard path,
         // which for Grok emits an empty list (no selectors) — same as before.
     }
+    // What the agent picked on its own, read before the replay below rewrites
+    // any of it (see `SessionState::agent_chosen_config_values`).
+    state.write().await.agent_chosen_config_values =
+        current_config_option_values(&map_session_config_options(&initial_config_options));
     let updated = apply_preferred_session_options(
         cx,
         session,
@@ -30862,6 +30871,144 @@ mod tests {
             .map(|(id, _)| id.as_str())
             .collect();
         assert_eq!(ordered, vec!["a_thing", "z_thing"]);
+    }
+
+    /// Establishment keeps what the agent picked on its own, read BEFORE the
+    /// saved preferences replay over it. The options probe reports that for
+    /// each option it applied (`report_agent_chosen_values` in the manager), so
+    /// the delegation panel's "Default" names the agent's model rather than the
+    /// user's. Shaped like a live opencode 2.0.24: switching the model re-lists
+    /// `effort` for it.
+    #[tokio::test]
+    async fn establishment_keeps_the_agents_own_picks_from_before_the_preference_replay() {
+        use agent_client_protocol::schema::v1::SetSessionConfigOptionResponse;
+
+        fn options(model: &str, effort: &str, efforts: &[&str]) -> Vec<SessionConfigOption> {
+            let efforts: Vec<serde_json::Value> = efforts
+                .iter()
+                .map(|value| serde_json::json!({"value": value, "name": value}))
+                .collect();
+            serde_json::from_value(serde_json::json!([
+                {
+                    "type": "select",
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "currentValue": model,
+                    "options": [
+                        {"value": "opencode/exo-free", "name": "Exo"},
+                        {"value": "opencode/step-5-preview-free", "name": "Step 5"}
+                    ]
+                },
+                {
+                    "type": "select",
+                    "id": "effort",
+                    "name": "Effort",
+                    "category": "thought_level",
+                    "currentValue": effort,
+                    "options": efforts
+                },
+            ]))
+            .expect("parses")
+        }
+
+        let (client_end, agent_end) = agent_client_protocol::Channel::duplex();
+        let agent = tokio::spawn(async move {
+            let _ = Agent
+                .builder()
+                .on_receive_request(
+                    async |_req: NewSessionRequest,
+                           responder: Responder<NewSessionResponse>,
+                           _cx: ConnectionTo<Client>| {
+                        let opened = options("opencode/exo-free", "high", &["high", "default"]);
+                        responder.respond(
+                            NewSessionResponse::new(SessionId::new("s1")).config_options(opened),
+                        )
+                    },
+                    on_receive_request!(),
+                )
+                .on_receive_request(
+                    async |_req: SetSessionConfigOptionRequest,
+                           responder: Responder<SetSessionConfigOptionResponse>,
+                           _cx: ConnectionTo<Client>| {
+                        // Only the model is replayed: the answer re-lists effort.
+                        let switched = options(
+                            "opencode/step-5-preview-free",
+                            "default",
+                            &["low", "medium", "high", "default"],
+                        );
+                        responder.respond(SetSessionConfigOptionResponse::new(switched))
+                    },
+                    on_receive_request!(),
+                )
+                .connect_with(agent_end, async |_cx: ConnectionTo<Client>| {
+                    std::future::pending::<Result<(), agent_client_protocol::Error>>().await
+                })
+                .await;
+        });
+
+        let state = Arc::new(RwLock::new(SessionState::new(
+            "conn-probe".to_string(),
+            AgentType::OpenCode,
+            None,
+            "delegation-probe".to_string(),
+            None,
+        )));
+        let establishment_state = Arc::clone(&state);
+        Client
+            .builder()
+            .connect_with(client_end, async move |cx: ConnectionTo<Agent>| {
+                let raw = cx
+                    .send_request_to(
+                        Agent,
+                        UntypedMessage::new("session/new", NewSessionRequest::new("/tmp"))?,
+                    )
+                    .block_task()
+                    .await?;
+                let response: NewSessionResponse = serde_json::from_value(raw)
+                    .map_err(agent_client_protocol::Error::into_internal_error)?;
+                let initial = response.config_options.clone().unwrap_or_default();
+                let mut session = AgentSession::attach(&cx, response)?;
+                let preferred = BTreeMap::from([(
+                    "model".to_string(),
+                    "opencode/step-5-preview-free".to_string(),
+                )]);
+                apply_and_emit_session_config_options(
+                    &cx,
+                    &mut session,
+                    &establishment_state,
+                    &EventEmitter::Noop,
+                    AgentType::OpenCode,
+                    None,
+                    None,
+                    None,
+                    &preferred,
+                    initial,
+                )
+                .await;
+                Ok(())
+            })
+            .await
+            .expect("the establishment runs");
+        agent.abort();
+
+        let state = state.read().await;
+        assert_eq!(
+            state.agent_chosen_config_values,
+            BTreeMap::from([
+                ("model".to_string(), "opencode/exo-free".to_string()),
+                ("effort".to_string(), "high".to_string()),
+            ]),
+            "the agent's own picks, from before the replay"
+        );
+        // …while the session itself runs the preference, effort re-listed for it.
+        let current =
+            current_config_option_values(state.config_options.as_deref().unwrap_or_default());
+        assert_eq!(
+            current.get("model").map(String::as_str),
+            Some("opencode/step-5-preview-free")
+        );
+        assert_eq!(current.get("effort").map(String::as_str), Some("default"));
     }
 
     /// The claude shape: a model select plus the effort option that hangs off it.

@@ -731,10 +731,12 @@ const ConversationTabView = memo(function ConversationTabView({
     () => effectiveConfigOptions ?? [],
     [effectiveConfigOptions]
   )
-  const connectionCommands = useMemo(
-    () => (connIsForOtherAgent ? [] : (conn.availableCommands ?? [])),
-    [connIsForOtherAgent, conn.availableCommands]
-  )
+  // `null` until this tab's agent has advertised (no connection, one still
+  // coming up, or one still bound to another agent), never `[]`, which is an
+  // answer: the agent offers no commands. The composers read the two alike;
+  // the transcript tells them apart, badging from what this agent last
+  // advertised in this folder while the list is unknown.
+  const connectionCommands = connIsForOtherAgent ? null : conn.availableCommands
   const selectedModeId = useMemo(() => {
     if (connectionModes.length === 0) return null
     if (modeId && connectionModes.some((mode) => mode.id === modeId)) {
@@ -2103,6 +2105,7 @@ const ConversationTabView = memo(function ConversationTabView({
         conversationId={effectiveConversationId}
         imageRoot={workingDirForConnection ?? null}
         agentType={selectedAgent}
+        availableCommands={connectionCommands}
         connStatus={connStatus}
         isActive={isActive}
         sendSignal={sendSignal}
