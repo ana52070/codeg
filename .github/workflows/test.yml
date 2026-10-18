@@ -6,6 +6,7 @@ on:
       - main
       - ci/pr845-conflict-20261018
   pull_request:
+  workflow_dispatch:
 
 env:
   RUST_BACKTRACE: short
