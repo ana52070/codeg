@@ -1,6 +1,7 @@
 pub mod acp;
 #[cfg(feature = "tauri-runtime")]
 pub mod app_update;
+pub mod assistants;
 pub mod automation;
 pub mod background;
 pub mod backup;
@@ -12,12 +13,24 @@ pub mod browser_tools;
 pub mod canvas;
 pub mod chat_authoring;
 pub mod chat_channel;
+/// The `codeg-cli` access switch (desktop; the server's is a web handler).
+#[cfg(feature = "tauri-runtime")]
+pub mod cli_access;
 /// Files-onto-the-OS-clipboard. Only the command itself is desktop-gated; the
 /// path validation and URI encoding stay compiled in every mode so their tests
 /// run without the tauri stack.
 pub mod clipboard;
+/// Computer use: sharing windows, the helper, the agent reads — the desktop
+/// app's, and codeg-server's where it is let share the screen it runs on.
+pub mod computer;
+/// The computer-use switches. Like `browser_tools`, compiled in both runtimes:
+/// the shared codeg-mcp plumbing reads them.
+pub mod computer_tools;
 pub mod config_sync;
+pub mod conversation_tags;
 pub mod conversations;
+/// "New folder" in the directory browser (both runtimes).
+pub mod create_directory;
 pub mod custom_agents;
 pub mod custom_skills;
 pub mod deepseek_settings;
@@ -30,6 +43,8 @@ pub mod folder_commands;
 pub mod folder_links;
 pub mod folders;
 pub mod forge;
+/// The `ui-render` skill and the agents it is enabled for (Skill Packs > UI).
+pub mod generative_ui;
 pub mod logging;
 pub mod mcp;
 pub mod mcp_service;
@@ -42,6 +57,7 @@ pub mod pet;
 pub mod project_boot;
 pub mod question;
 pub mod quick_messages;
+pub mod quota;
 #[cfg(feature = "tauri-runtime")]
 pub mod remote_proxy;
 #[cfg(feature = "tauri-runtime")]
@@ -57,3 +73,5 @@ pub mod version_control;
 pub mod windows;
 pub mod work_task;
 pub mod workspace_state;
+#[cfg(feature = "tauri-runtime")]
+pub mod workspace_windows;

@@ -226,6 +226,24 @@ pub struct BrokerTaskCompleteRequest {
     pub summary: Option<String>,
 }
 
+/// The JSON Schema `submit_result` takes, for the companion's `tools/list`.
+/// Answered `{"schema": <schema>}` — `null` when the caller's connection was
+/// asked for no result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerResultSchemaRequest {
+    pub token: String,
+}
+
+/// A result handed in with `submit_result`. Answered with a serialized
+/// [`crate::cli_run::output_schema::SubmitOutcome`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerSubmitResultRequest {
+    pub token: String,
+    /// The tool call's arguments, as the agent gave them.
+    #[serde(default)]
+    pub result: Value,
+}
+
 /// Create an automation (scheduled or manual) from the chat the caller is in.
 /// Backs the `create_automation` MCP tool. Authenticated by the per-launch
 /// `token`; the listener resolves the caller's conversation + working directory
@@ -331,6 +349,87 @@ pub struct BrokerBrowserTabOpRequest {
     pub op: crate::acp::browser_tools::BrowserTabOp,
 }
 
+/// List the running applications. Backs `computer_list_apps`. Token-scoped
+/// only, like the browser listing: the desktop belongs to the user, not to a
+/// conversation, and what any agent may *read* of it is the per-window grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerAppsRequest {
+    pub token: String,
+}
+
+/// Start an installed application. Backs `computer_launch_app`. Token-scoped
+/// like the listing; whether it may be done at all is the person's switch,
+/// read on the codeg side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerLaunchRequest {
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// Read back, or write, the clipboard. Backs `computer_clipboard_read` and
+/// `computer_clipboard_write`; the person's switch for them and whose the
+/// clipboard's content is are judged on the codeg side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerClipboardRequest {
+    pub token: String,
+    pub op: crate::acp::computer_tools::ClipboardOp,
+}
+
+/// List the normal windows, or one process's. Backs `computer_list_windows`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerWindowsRequest {
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+/// A screenshot of one shared window. Backs `computer_screenshot`; the grant
+/// check, the second check after the capture and the activity line all happen
+/// behind it, in `commands::computer`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerCaptureRequest {
+    pub token: String,
+    pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_dimension: Option<u32>,
+}
+
+/// The accessibility tree of one shared window. Backs `computer_snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerSnapshotRequest {
+    pub token: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub request: crate::acp::computer_tools::SnapshotRequest,
+}
+
+/// Predicates checked against one shared window. Backs `computer_verify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerVerifyRequest {
+    pub token: String,
+    pub target_id: String,
+    pub request: crate::computer::types::VerifyRequest,
+}
+
+/// One action on a window shared for control. Backs `computer_click`,
+/// `computer_drag`, `computer_scroll`, `computer_type`, `computer_press_key`,
+/// `computer_hold_key`, `computer_set_value`, `computer_restore` and
+/// `computer_invoke_menu`; every
+/// check happens behind it, in `commands::computer`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerComputerActRequest {
+    pub token: String,
+    pub target_id: String,
+    pub request: crate::computer::types::ComputerActRequest,
+    /// How the call asked for the action to reach the window; the person's
+    /// default when it did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<crate::computer::types::ActDelivery>,
+}
+
 /// Tagged top-level message dispatched by the listener. Adding new variants
 /// is the wire-stable way to grow the broker protocol without touching the
 /// frame layer.
@@ -348,6 +447,8 @@ pub enum BrokerMessage {
     SessionInfo(BrokerSessionRequest),
     TaskProgress(BrokerTaskProgressRequest),
     TaskComplete(BrokerTaskCompleteRequest),
+    ResultSchema(BrokerResultSchemaRequest),
+    SubmitResult(BrokerSubmitResultRequest),
     CreateAutomation(BrokerCreateAutomationRequest),
     CreateWorkTask(BrokerCreateWorkTaskRequest),
     BrowserTabs(BrokerBrowserTabsRequest),
@@ -357,15 +458,41 @@ pub enum BrokerMessage {
     BrowserCapture(BrokerBrowserCaptureRequest),
     BrowserEval(BrokerBrowserEvalRequest),
     BrowserTabOp(BrokerBrowserTabOpRequest),
-    /// Liveness probe. Unlike every other variant this one is NOT sent by a
-    /// companion — it comes from codeg's own service-status check
-    /// (`acp::delegation::service`), which is why it carries no `token`: a
-    /// `{"ok": true}` answer reveals nothing beyond "the socket is being
-    /// served", which the connect itself already proved. Answering it end to
-    /// end (accept → decode → dispatch → encode → write) is the point: it
-    /// distinguishes a live accept loop from a stale socket file left behind
-    /// by a dead one, which a bare `connect()` cannot.
+    ComputerApps(BrokerComputerAppsRequest),
+    ComputerWindows(BrokerComputerWindowsRequest),
+    ComputerCapture(BrokerComputerCaptureRequest),
+    ComputerSnapshot(BrokerComputerSnapshotRequest),
+    ComputerVerify(BrokerComputerVerifyRequest),
+    ComputerAct(BrokerComputerActRequest),
+    ComputerLaunch(BrokerComputerLaunchRequest),
+    ComputerClipboard(BrokerComputerClipboardRequest),
+    /// Who may be delegated to as an assistant right now, for the
+    /// companion's `tools/list` schema roster. Answered
+    /// `{"assistants": [AssistantRosterEntry, ...]}` — always answered, an
+    /// empty list when the lookup fails, so a companion never mistakes a
+    /// refusal for an old listener (see `Ping`).
+    ListAssistants(BrokerListAssistantsRequest),
+    /// Liveness and capability probe, carrying no `token`: the answer reveals
+    /// nothing beyond "the socket is being served" and what this listener
+    /// understands. Sent by codeg's own service-status check
+    /// (`acp::delegation::service`), and by the companion to learn whether
+    /// its parent understands assistant delegation. Answering it end to end
+    /// (accept → decode → dispatch → encode → write) distinguishes a live
+    /// accept loop from a stale socket file left behind by a dead one, which a
+    /// bare `connect()` cannot.
+    ///
+    /// The answer is `{"ok": true, "assistants": true}`. A listener that
+    /// predates assistants answers a bare `{"ok": true}` — and would read an
+    /// `assistant_id` call as a plain `agent_type` delegation, silently
+    /// dropping the assistant's options and instructions. That is why the
+    /// companion asks before it forwards one (`AssistantSupport`).
     Ping,
+}
+
+/// See [`BrokerMessage::ListAssistants`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerListAssistantsRequest {
+    pub token: String,
 }
 
 /// The wrapped outcome the main process returns over the same socket.
@@ -540,6 +667,23 @@ pub async fn client_task_complete_round_trip(
     message_round_trip(socket_path, &BrokerMessage::TaskComplete(req.clone())).await
 }
 
+/// Ask for the schema `submit_result` takes on the caller's connection.
+pub async fn client_result_schema_round_trip(
+    socket_path: &str,
+    req: &BrokerResultSchemaRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ResultSchema(req.clone())).await
+}
+
+/// Hand in a `submit_result` result and read back its
+/// [`crate::cli_run::output_schema::SubmitOutcome`].
+pub async fn client_submit_result_round_trip(
+    socket_path: &str,
+    req: &BrokerSubmitResultRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::SubmitResult(req.clone())).await
+}
+
 /// Dispatch a `create_automation` request and read back the serialized
 /// [`crate::acp::chat_authoring::AuthoringOutcome`].
 pub async fn client_create_automation_round_trip(
@@ -621,13 +765,94 @@ pub async fn client_browser_tab_op_round_trip(
     message_round_trip(socket_path, &BrokerMessage::BrowserTabOp(req.clone())).await
 }
 
+/// Dispatch a `computer_list_apps` request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerAppsOutcome`].
+pub async fn client_computer_apps_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerAppsRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerApps(req.clone())).await
+}
+
+/// Dispatch a `computer_launch_app` request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerLaunchOutcome`].
+pub async fn client_computer_launch_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerLaunchRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerLaunch(req.clone())).await
+}
+
+/// Dispatch a clipboard request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerClipboardOutcome`].
+pub async fn client_computer_clipboard_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerClipboardRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerClipboard(req.clone())).await
+}
+
+/// Dispatch a `computer_list_windows` request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerWindowsOutcome`].
+pub async fn client_computer_windows_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerWindowsRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerWindows(req.clone())).await
+}
+
+/// Dispatch a `computer_screenshot` request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerCaptureOutcome`].
+pub async fn client_computer_capture_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerCaptureRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerCapture(req.clone())).await
+}
+
+/// Dispatch a `computer_snapshot` request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerSnapshotOutcome`].
+pub async fn client_computer_snapshot_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerSnapshotRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerSnapshot(req.clone())).await
+}
+
+/// Dispatch a `computer_verify` request and read back the serialized
+/// [`crate::acp::computer_tools::ComputerVerifyOutcome`].
+pub async fn client_computer_verify_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerVerifyRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerVerify(req.clone())).await
+}
+
+/// Dispatch one computer action and read back the serialized
+/// [`crate::acp::computer_tools::ComputerActOutcome`].
+pub async fn client_computer_act_round_trip(
+    socket_path: &str,
+    req: &BrokerComputerActRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ComputerAct(req.clone())).await
+}
+
 /// Probe the listener: write a [`BrokerMessage::Ping`] and read the
-/// `{"ok": true}` answer back. Used by the codeg-mcp service-status indicator
-/// to tell "listening" from "socket file exists but nobody is accepting".
+/// `{"ok": true, ..}` answer back. Used by the codeg-mcp service-status
+/// indicator to tell "listening" from "socket file exists but nobody is
+/// accepting", and by the companion's assistant-support probe.
 /// Callers should wrap this in their own timeout — a socket whose peer accepts
 /// but never answers would otherwise park here.
 pub async fn client_ping(socket_path: &str) -> io::Result<BrokerResponse> {
     message_round_trip(socket_path, &BrokerMessage::Ping).await
+}
+
+/// Fetch the assistant roster (see [`BrokerMessage::ListAssistants`]).
+pub async fn client_list_assistants_round_trip(
+    socket_path: &str,
+    req: &BrokerListAssistantsRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ListAssistants(req.clone())).await
 }
 
 /// Total budget for `open()` retries on Windows named pipes. Has to be
@@ -864,9 +1089,10 @@ mod tests {
         use tokio::net::UnixListener;
 
         // `/tmp`, not `$TMPDIR`: a socket path has ~104 bytes of `sun_path` to
-        // live in, and codeg exports a 72-byte per-session `TMPDIR` to the
-        // agents it launches. Under `tempdir()` this lands at 99 bytes there —
-        // green, but one directory level from an unexplainable red.
+        // live in, and `$TMPDIR` is whatever the environment hands us. Under
+        // the ~72-byte per-session `TMPDIR` codeg exported before #754 this
+        // landed at 99 bytes — green, but one directory level from an
+        // unexplainable red — and a hand-set one can be longer still.
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let path = dir.path().join("codeg-mcp.sock");
         let listener = UnixListener::bind(&path).unwrap();

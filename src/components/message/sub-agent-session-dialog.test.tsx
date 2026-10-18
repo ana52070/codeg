@@ -86,6 +86,7 @@ vi.mock("@/contexts/acp-connections-context", async () => {
       },
       getConnection: () => mockChildConnection,
       getConnectPending: () => undefined,
+      getConnectError: () => undefined,
       getActiveKey: () => null,
       subscribeActiveKey: () => () => {},
     }),
@@ -177,6 +178,12 @@ vi.mock("@/components/message/message-list-view", () => ({
           ? "null"
           : String(props.connStatus)
       }
+      data-agent-type={String(props.agentType)}
+      data-available-commands={
+        props.availableCommands === undefined
+          ? "undefined"
+          : JSON.stringify(props.availableCommands)
+      }
     />
   ),
 }))
@@ -204,6 +211,8 @@ function makeConnState(overrides: Partial<ConnectionState>): ConnectionState {
     configOptions: null,
     availableCommands: null,
     usage: null,
+    promptSuggestion: null,
+    remoteControl: null,
     liveMessage: null,
     pendingPermission: null,
     pendingQuestion: null,
@@ -228,6 +237,7 @@ function makeConnState(overrides: Partial<ConnectionState>): ConnectionState {
     configStaleDismissed: false,
     backgroundOutstanding: 0,
     outOfTurnToolCalls: null,
+    cancelledTurn: null,
     ...overrides,
   }
 }
@@ -264,7 +274,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(screen.queryByTestId("message-list-view")).not.toBeInTheDocument()
@@ -286,7 +300,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     const dialog = screen.getByTestId("permission-dialog")
@@ -304,7 +322,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(screen.queryByTestId("permission-dialog")).not.toBeInTheDocument()
@@ -324,7 +346,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     const card = screen.getByTestId("ask-question-card")
@@ -347,7 +373,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(screen.queryByTestId("ask-question-card")).not.toBeInTheDocument()
@@ -367,7 +397,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(screen.queryByTestId("ask-question-card")).not.toBeInTheDocument()
@@ -387,7 +421,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId={null}
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(screen.queryByTestId("ask-question-card")).not.toBeInTheDocument()
@@ -401,7 +439,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     const list = screen.getByTestId("message-list-view")
@@ -414,6 +456,58 @@ describe("SubAgentSessionDialog", () => {
     // isActive=false marks this as a passive embed, not the live active panel.
     expect(list).toHaveAttribute("data-is-active", "false")
     expect(list).toHaveAttribute("data-conversation-id", "99")
+  })
+
+  it("names the viewed connection's agent to the transcript when the host does not know it", () => {
+    // Its commands, and what it last advertised in this folder, are that
+    // agent's: a Claude default would badge another agent's record.
+    mockChildConnection = makeConnState({ agentType: "codex" })
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId="c1"
+        identity={{ agentType: null, assistantId: null, assistantName: null }}
+      />
+    )
+    const list = screen.getByTestId("message-list-view")
+    expect(list).toHaveAttribute("data-agent-type", "codex")
+    expect(list).toHaveAttribute("data-available-commands", "null")
+  })
+
+  it("badges no command at all when no agent is known, rather than a default's", () => {
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId={null}
+        identity={{ agentType: null, assistantId: null, assistantName: null }}
+      />
+    )
+    const list = screen.getByTestId("message-list-view")
+    expect(list).toHaveAttribute("data-agent-type", "claude_code")
+    expect(list).toHaveAttribute("data-available-commands", "[]")
+  })
+
+  it("leaves a known agent's list unknown without a connection, so its remembered one stands in", () => {
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId={null}
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
+      />
+    )
+    const list = screen.getByTestId("message-list-view")
+    expect(list).toHaveAttribute("data-agent-type", "codex")
+    expect(list).toHaveAttribute("data-available-commands", "undefined")
   })
 
   it("bridges conn.liveMessage to setLiveMessage while open and clears the runtime session on close", () => {
@@ -433,7 +527,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // First mount forwards the current liveMessage with isLive=true so the
@@ -455,7 +553,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // The dialog always marks the session so the render-time projection can
@@ -472,7 +574,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
         kickoffTask="check the failing tests"
       />
     )
@@ -502,7 +608,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // The mount-time fetch must use preserveLive:true so an in-flight or
@@ -527,7 +637,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // Ignore the mount-time preserveLive fetch; this asserts the settle edge.
@@ -561,7 +675,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(mockCompleteTurn).not.toHaveBeenCalled()
@@ -595,7 +713,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // The retained reply is bridged as live (bypassing the reconnect-replay
@@ -618,7 +740,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(mockCompleteTurn).not.toHaveBeenCalled()
@@ -638,7 +764,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // No backfill while still streaming — only after the turn settles.
@@ -669,7 +799,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // The adopt path promotes the retained reply, so its stats must backfill too.
@@ -690,7 +824,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     mockChildConnection = makeConnState({ status: "connected", liveMessage })
@@ -720,7 +858,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(mockSetLiveMessage).not.toHaveBeenCalled()
@@ -734,13 +876,36 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={() => {}}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     expect(
       screen.queryByText("check the failing tests")
     ).not.toBeInTheDocument()
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument()
+  })
+
+  it("titles the drawer with the assistant the task ran as", () => {
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId="c1"
+        identity={{
+          agentType: "codex",
+          assistantId: 3,
+          assistantName: "Reviewer",
+        }}
+      />
+    )
+    // Not in the store: the name the delegation carried, then its agent.
+    expect(screen.getByText("Reviewer")).toBeInTheDocument()
+    expect(screen.getByText("· Codex")).toBeInTheDocument()
   })
 
   it("forces a fresh refetchDetail on every settled open so an in-flight fetch from a previous (now-closed) dialog can't surface stale state", () => {
@@ -752,7 +917,11 @@ describe("SubAgentSessionDialog", () => {
       onOpenChange: () => {},
       childConversationId: 99,
       childConnectionId: "c1",
-      agentType: "codex" as const,
+      identity: {
+        agentType: "codex" as const,
+        assistantId: null,
+        assistantName: null,
+      },
     }
     const { unmount } = renderWithIntl(<SubAgentSessionDialog {...props} />)
     expect(mockRefetchDetail).toHaveBeenCalledWith(99, { preserveLive: true })
@@ -784,7 +953,11 @@ describe("SubAgentSessionDialog", () => {
         onOpenChange={onOpenChange}
         childConversationId={99}
         childConnectionId="c1"
-        agentType="codex"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
       />
     )
     // The Drawer's built-in close button is rendered with an accessible
@@ -800,5 +973,43 @@ describe("SubAgentSessionDialog", () => {
       false,
       expect.objectContaining({ reason: "close-press" })
     )
+  })
+
+  it("closes on a browser back instead of letting it leave the page", async () => {
+    // Start on an unmarked entry: earlier cases leave the drawer's entries
+    // behind, and the open below would take a marked one over.
+    window.history.replaceState(null, "")
+    const onOpenChange = vi.fn()
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={onOpenChange}
+        childConversationId={99}
+        childConnectionId="c1"
+        identity={{
+          agentType: "codex",
+          assistantId: null,
+          assistantName: null,
+        }}
+      />
+    )
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        // Bounded: without an entry of its own the back has nowhere to go
+        // and no popstate ever arrives.
+        const timer = setTimeout(resolve, 500)
+        window.addEventListener(
+          "popstate",
+          () => {
+            clearTimeout(timer)
+            resolve()
+          },
+          { once: true }
+        )
+        window.history.back()
+      })
+    })
+    expect(onOpenChange).toHaveBeenCalledTimes(1)
+    expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 })

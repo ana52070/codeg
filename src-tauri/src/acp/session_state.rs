@@ -18,8 +18,8 @@ use crate::acp::plan_approval::PendingPlanApprovalState;
 use crate::acp::question::PendingQuestionState;
 use crate::acp::types::{
     AcpEvent, AsyncTaskRecord, AvailableCommandInfo, ConfigStaleKind, ConnectionStatus,
-    EventEnvelope, GrokModelSpec, PromptCapabilitiesInfo, SessionConfigOptionInfo,
-    SessionFailureRecord, SessionModeStateInfo, ToolCallImageInfo,
+    EventEnvelope, GrokModelCatalog, GrokModelSpec, PromptCapabilitiesInfo, RemoteControlInfo,
+    SessionConfigOptionInfo, SessionFailureRecord, SessionModeStateInfo, ToolCallImageInfo,
 };
 use crate::models::agent::AgentType;
 use crate::models::message::MessageRole;
@@ -227,6 +227,12 @@ pub struct ActiveDelegationState {
     pub task_preview: String,
     #[serde(default)]
     pub task_id: String,
+    /// The assistant the child runs as, mirrored from `DelegationStarted` for
+    /// the same re-attach reason as the task label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_id: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_name: Option<String>,
 }
 
 /// The in-flight user prompt for the current turn. Captured from
@@ -265,6 +271,16 @@ pub struct SessionState {
     pub status: ConnectionStatus,
     pub live_message: Option<LiveMessage>,
     pub active_tool_calls: BTreeMap<String, ToolCallState>,
+    /// The answers codeg sent back for Qoder `AskUserQuestion` calls whose
+    /// completion has not arrived yet, keyed by tool-call id: the elicitation
+    /// reply's `content` as written (`q<n>` → the chosen label, or a
+    /// multi-select's chosen labels and the user's own text as separate
+    /// entries). Qoder's completion carries the answers only flattened into a
+    /// sentence, where a multi-select can no longer be told apart from typed
+    /// text, so the live path renders the call from this instead. Written by
+    /// the elicitation handler before it replies, taken by the update that
+    /// settles the call; per-turn, like `active_tool_calls`.
+    pub qoder_ask_replies: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     pub pending_permission: Option<PendingPermissionState>,
 
     /// The agent's in-flight `ask_user_question` (one set of multiple-choice
@@ -328,12 +344,36 @@ pub struct SessionState {
     pub config_options: Option<Vec<SessionConfigOptionInfo>>,
     /// Grok only: per-model reasoning-effort specs, parsed from the top-level
     /// `models` of the session-establishment response (guaranteed on
-    /// `session/new`; opportunistic on resume/fork). Grok never re-sends this on
+    /// `session/new`; opportunistic on resume/fork) and refreshed by each model
+    /// catalog broadcast (`_x.ai/models/update`). Grok never re-sends this on
     /// `set_model`, so it is cached here to rebuild the composer's effort
     /// selector for the target model on a mid-session model switch. `None` for
-    /// non-Grok agents and when the response carried no `models` (flat fallback).
-    /// Backend-internal — not serialized.
+    /// non-Grok agents and when the response carried no `models` (flat fallback)
+    /// and no broadcast has come in since. Backend-internal — not serialized.
     pub grok_model_specs: Option<std::collections::HashMap<String, GrokModelSpec>>,
+    /// Grok only: the latest model catalog grok broadcast on
+    /// `_x.ai/models/update` since the current session establishment began,
+    /// for that establishment to fold into the picker it emits (see
+    /// `acp::connection::emit_grok_established_picker`).
+    ///
+    /// The broadcast names no session and can land at any point of an
+    /// establishment, including after the handshake answered but before its
+    /// picker went out — and the handshake itself may predate the catalog it
+    /// brings. Every broadcast also goes straight into the picker already on
+    /// screen, if any; this slot covers the one being built. Set by every
+    /// broadcast, taken by the establishment's emit, and cleared when a fork
+    /// sends `session/fork` — so a broadcast from before an establishment began
+    /// can never overrule that establishment's fresher handshake.
+    /// Backend-internal — not serialized.
+    pub grok_catalog_broadcast: Option<GrokModelCatalog>,
+
+    /// Kiro only: the reasoning-effort state from its latest
+    /// `_kiro.dev/metadata` (which arrives on its own schedule — after
+    /// `session/new`, and again after every model or effort change). Kept here
+    /// so the effort selector can be built whether that notification lands
+    /// before or after the session's selectors are first emitted. `None` =
+    /// Kiro has said nothing yet. Backend-internal — not serialized.
+    pub kiro_reasoning: Option<crate::acp::types::KiroReasoning>,
 
     /// pi only: the session prelude pi-acp reports as `_meta.piAcp.startupInfo`
     /// on `session/new`, held until the matching `agent_message_chunk` arrives
@@ -366,6 +406,21 @@ pub struct SessionState {
     ///
     /// Backend-internal — not serialized, not carried on `to_snapshot()`.
     pub asserted_config_values: BTreeMap<String, String>,
+    /// Each config option's value as the agent itself picked it for this
+    /// session: the establishment's own answer (or the picker Grok's handshake
+    /// yields), read BEFORE codeg replays any saved preference over it.
+    /// Rewritten by every establishment, whether or not it had preferences to
+    /// replay.
+    ///
+    /// Only the options probe reads it (`ConnectionManager::probe_agent_options`).
+    /// The probe applies the caller's model so that options the agent derives
+    /// from it — opencode re-lists `effort` per model — answer for that model.
+    /// `config_options` then holds the caller's own model as the current one,
+    /// while what the probe must report for an applied option is what it runs
+    /// when left unset: the agent's default, kept here.
+    ///
+    /// Backend-internal — not serialized, not carried on `to_snapshot()`.
+    pub agent_chosen_config_values: BTreeMap<String, String>,
     /// Config-option ids this launch pinned through the environment, which the
     /// agent will therefore refuse to change for as long as the process lives.
     ///
@@ -384,10 +439,37 @@ pub struct SessionState {
     ///
     /// Backend-internal — not serialized, not carried on `to_snapshot()`.
     pub env_pinned_config_option_ids: Vec<String>,
+    /// TRAE CLI only: whether this launch carries a personal access token
+    /// (`acp::trae::pat_sign_in_requested`), so the handshake signs in with
+    /// TRAE's PAT auth method before it opens a session. TRAE CLI does not
+    /// read the token on its own. Always `false` for every other agent.
+    ///
+    /// Backend-internal — not serialized, not carried on `to_snapshot()`.
+    pub trae_pat_sign_in: bool,
     pub prompt_capabilities: Option<PromptCapabilitiesInfo>,
     pub fork_supported: bool,
     pub available_commands: Vec<AvailableCommandInfo>,
     pub usage: Option<UsageInfo>,
+    /// The follow-up prompt the agent last predicted (`AcpEvent::PromptSuggestion`),
+    /// offered by the composer while it is empty. Cleared when a prompt starts,
+    /// as the frontend reducer clears it, and when the connection moves to
+    /// another session: it predicted what follows THAT session's last turn.
+    /// Carried on `to_snapshot()` so a client attaching between turns offers it
+    /// too.
+    pub prompt_suggestion: Option<String>,
+    /// Whether this connection's sessions ask the agent to predict the next
+    /// prompt (claude-agent-acp's `promptSuggestions`, which costs one request
+    /// after every turn; see `connection::claude_raw_sdk_session_meta`). Fixed
+    /// at creation by [`owner_composes_prompts`]. Backend-internal — not
+    /// serialized, not carried on `to_snapshot()`.
+    pub wants_prompt_suggestions: bool,
+    /// Claude Code's Remote Control while it is on (`AcpEvent::RemoteControl`):
+    /// the session can be continued from claude.ai/code or a phone. It lives
+    /// in the agent CLI, so the idle sweeps leave the connection alone while
+    /// this is set (`manager::sweep_idle`). Cleared when the connection moves
+    /// to another session, since codeg closes the session a fork leaves and
+    /// its CLI with it. Carried on `to_snapshot()`.
+    pub remote_control: Option<RemoteControlInfo>,
     /// True once the agent's initial selectors handshake (modes +
     /// config_options) has finished and `SelectorsReady` has fired. Persisted
     /// on the snapshot so a frontend that reconnects after refresh can see
@@ -457,6 +539,12 @@ pub struct SessionState {
     /// frontend gates the feedback bar on the agent's actual capability, not the
     /// (possibly later-toggled) global setting.
     pub feedback_tool_available: bool,
+
+    /// Whether `submit_result` was exposed to THIS agent at launch: the
+    /// connection had a `cli_output_schema`, and its codeg-mcp was injected.
+    /// Fixed for the connection's lifetime. Decides how the run's prompt says
+    /// to hand the result in. Backend-only.
+    pub result_tool_available: bool,
 
     /// Whether live-feedback notes for THIS session go over the native ACP
     /// `_session/steering` push channel instead of the `check_user_feedback`
@@ -596,6 +684,15 @@ pub struct SessionState {
     /// not part of the client-visible snapshot.
     pub turn_in_flight: bool,
 
+    /// Whether the open turn is one the AGENT started on its own (Grok's
+    /// follow-up to a background workflow), which the idle loop renders as a
+    /// turn so its content isn't dropped between turns. Such a turn never took
+    /// the `turn_in_flight` gate, so its `TurnComplete` must leave the gate
+    /// alone: a prompt the manager admitted while it ran owns it. Set only by
+    /// [`Self::begin_agent_initiated_turn`]; cleared by `TurnComplete`. Not
+    /// serialized: backend-internal, like `turn_in_flight`.
+    pub agent_initiated_turn: bool,
+
     /// How many `TurnComplete`s this connection has applied — the turn's
     /// IDENTITY, paired with `turn_in_flight`. `turn_in_flight` alone only says
     /// "some turn is running"; a caller that admitted itself against turn N and
@@ -647,9 +744,69 @@ pub struct SessionState {
     /// `ConversationLinked` so a title dropped while the row was still
     /// unbound can be accepted on the next send.
     pub last_native_title: Option<String>,
+    /// The title claude-agent-acp last published in `session_info_update`,
+    /// normalized, held instead of written. Claude Code's transcript is the
+    /// only title source while codeg can read it, so the transcript watcher
+    /// drops this once it reads the transcript and publishes it only while it
+    /// cannot (`session_title::accept_wire_title` and
+    /// `release_held_wire_title`). Backend-internal: not on the client
+    /// snapshot.
+    pub held_wire_title: Option<String>,
+    /// Woken whenever `held_wire_title` is set, so the transcript watcher
+    /// settles it on an immediate poll rather than its next scheduled one.
+    pub wire_title_wake: Arc<tokio::sync::Notify>,
+
+    /// The headless `codeg-cli` run this connection belongs to — its root
+    /// connection, or a delegation child that inherited the tag when it was
+    /// spawned. `None` for every other connection. Never on the snapshot.
+    pub cli_run: Option<crate::cli_run::CliRunTag>,
+
+    /// The `--output-schema` of the run whose ROOT connection this is: what
+    /// codeg-mcp's `submit_result` takes, and what the agent handed in. In
+    /// place from the moment the connection exists (`RootSeed`), so the
+    /// companion it is given carries the tool; a delegated child never has
+    /// one. Never on the snapshot.
+    pub cli_output_schema: Option<Arc<crate::cli_run::OutputSchema>>,
+
+    /// Which writer owns the conversation-status write of a `TurnComplete`,
+    /// keyed by that event's envelope `seq`. See [`Self::claim_turn_status`].
+    pub turn_status_claim: Option<(u64, TurnStatusWriter)>,
+}
+
+/// The two writers of a `TurnComplete`'s conversation status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStatusWriter {
+    /// The lifecycle worker, which writes it for every connection.
+    Lifecycle,
+    /// A CLI run's fallback, for a turn the worker never got (bus lag).
+    CliFallback,
 }
 
 impl SessionState {
+    /// Claim the conversation-status write of the `TurnComplete` at `seq` for
+    /// `writer`. `true` when `writer` owns it — newly, or already (a retry of
+    /// its own write runs again with the same envelope); `false` when the other
+    /// writer claimed it first, which then skips the write entirely. So a
+    /// fallback write can never be overwritten by a lifecycle write that
+    /// arrives late, and neither writer is ever stopped from retrying its own.
+    pub fn claim_turn_status(&mut self, seq: u64, writer: TurnStatusWriter) -> bool {
+        match self.turn_status_claim {
+            Some((claimed, owner)) if claimed == seq => owner == writer,
+            _ => {
+                self.turn_status_claim = Some((seq, writer));
+                true
+            }
+        }
+    }
+
+    /// Give up `writer`'s claim on the `TurnComplete` at `seq`, its write
+    /// having failed for good: the other writer may still make it.
+    pub fn release_turn_status(&mut self, seq: u64, writer: TurnStatusWriter) {
+        if self.turn_status_claim == Some((seq, writer)) {
+            self.turn_status_claim = None;
+        }
+    }
+
     pub fn new(
         connection_id: String,
         agent_type: AgentType,
@@ -657,6 +814,7 @@ impl SessionState {
         owner_window_label: String,
         folder_id: Option<i32>,
     ) -> Self {
+        let wants_prompt_suggestions = owner_composes_prompts(&owner_window_label);
         Self {
             connection_id,
             conversation_id: None,
@@ -669,6 +827,7 @@ impl SessionState {
             status: ConnectionStatus::Connecting,
             live_message: None,
             active_tool_calls: BTreeMap::new(),
+            qoder_ask_replies: BTreeMap::new(),
             pending_permission: None,
             pending_question: None,
             pending_plan_approval: None,
@@ -680,13 +839,20 @@ impl SessionState {
             current_mode: None,
             config_options: None,
             grok_model_specs: None,
+            grok_catalog_broadcast: None,
+            kiro_reasoning: None,
             pi_startup_banner: None,
             asserted_config_values: BTreeMap::new(),
+            agent_chosen_config_values: BTreeMap::new(),
             env_pinned_config_option_ids: Vec::new(),
+            trae_pat_sign_in: false,
             prompt_capabilities: None,
             fork_supported: false,
             available_commands: Vec::new(),
             usage: None,
+            prompt_suggestion: None,
+            wants_prompt_suggestions,
+            remote_control: None,
             selectors_ready: false,
             last_error: None,
             session_started_tx: None,
@@ -697,6 +863,7 @@ impl SessionState {
             delegation_token: None,
             delegation_enabled: false,
             feedback_tool_available: false,
+            result_tool_available: false,
             native_steering_available: false,
             codex_user_input_shape: None,
             neutral_goal_channel: false,
@@ -710,11 +877,17 @@ impl SessionState {
             pending_user_message: None,
             pending_user_message_started_at: None,
             turn_in_flight: false,
+            agent_initiated_turn: false,
             turns_completed: 0,
             last_turn_ended_abnormally: false,
             config_stale: false,
             config_stale_kind: None,
             last_native_title: None,
+            held_wire_title: None,
+            wire_title_wake: Arc::new(tokio::sync::Notify::new()),
+            cli_run: None,
+            cli_output_schema: None,
+            turn_status_claim: None,
         }
     }
 
@@ -729,6 +902,11 @@ impl SessionState {
     /// snapshot). See `RecentEventsBuffer::range_after`.
     pub fn recent_events_after(&self, since_seq: u64) -> Option<Vec<Arc<EventEnvelope>>> {
         self.recent_events.range_after(since_seq)
+    }
+
+    /// What is still buffered after `since_seq`, even across a gap.
+    pub fn recent_events_retained_after(&self, since_seq: u64) -> Vec<Arc<EventEnvelope>> {
+        self.recent_events.retained_after(since_seq)
     }
 
     /// Push an envelope into the ring buffer. Must be called under the
@@ -776,6 +954,12 @@ impl SessionState {
                     // accepted between turns.
                     self.async_tasks.clear();
                     self.async_task_activity_at = None;
+                    // A prediction follows the last turn of the session it was
+                    // made in; a fork starts from an earlier point of it.
+                    self.prompt_suggestion = None;
+                    // Remote Control belongs to the session left behind, whose
+                    // CLI goes when codeg closes it after the fork.
+                    self.remote_control = None;
                 }
                 self.external_id = Some(session_id.clone());
                 self.status = ConnectionStatus::Connected;
@@ -807,6 +991,29 @@ impl SessionState {
                     // new error scope, so stale recoverable errors must not be
                     // resurrected by a later snapshot attach.
                     self.last_error = None;
+                    // ...and a new turn starts from an empty live message, as
+                    // the reducer's does here. Anything in it now arrived
+                    // between turns, which no client rendered: left in place it
+                    // would open this turn's snapshot — a client attaching
+                    // mid-turn would render it twice, since a custom agent's
+                    // history already holds it as a turn of its own — and this
+                    // turn's captured result. `begin_agent_initiated_turn`
+                    // does the same for a turn the agent starts itself. The
+                    // tool-call table stays: it is cleared at `TurnComplete`,
+                    // and nothing renders an entry the live message no longer
+                    // references.
+                    self.live_message = None;
+                    // The prediction was for this prompt's place: whatever the
+                    // user sent, it is spent (the adapter clears its copy the
+                    // same way).
+                    self.prompt_suggestion = None;
+                }
+                if matches!(
+                    status,
+                    ConnectionStatus::Disconnected | ConnectionStatus::Error
+                ) {
+                    // Remote Control ran in the agent CLI, which is gone.
+                    self.remote_control = None;
                 }
                 self.status = status.clone();
             }
@@ -850,6 +1057,12 @@ impl SessionState {
                     used: *used,
                     size: *size,
                 });
+            }
+            AcpEvent::PromptSuggestion { text } => {
+                self.prompt_suggestion = text.clone();
+            }
+            AcpEvent::RemoteControl { remote_control } => {
+                self.remote_control = remote_control.clone();
             }
             AcpEvent::ContentDelta {
                 text,
@@ -963,7 +1176,7 @@ impl SessionState {
                     pending.queued = *depth;
                 }
             }
-            AcpEvent::PermissionResolved { request_id } => {
+            AcpEvent::PermissionResolved { request_id, .. } => {
                 // Drop the snapshot's pending_permission iff the resolved
                 // request matches the current one. Without the id check, a
                 // late-arriving resolved event for an already-replaced
@@ -1120,6 +1333,7 @@ impl SessionState {
                 }
                 self.live_message = None;
                 self.active_tool_calls.clear();
+                self.qoder_ask_replies.clear();
                 // The turn's user prompt is no longer "in flight" — the
                 // assistant reply is done and the transcript is the source of
                 // truth. Clear it so a post-turn snapshot doesn't carry a stale
@@ -1130,7 +1344,12 @@ impl SessionState {
                 // is accepted. (All connection-alive turn endings — normal,
                 // cancel, stop-reason — emit TurnComplete; disconnect/error
                 // discard the state entirely, so no stale flag can outlive them.)
-                self.turn_in_flight = false;
+                // A turn the agent started itself never held the gate; a set
+                // flag then belongs to a prompt admitted while it ran.
+                if !self.agent_initiated_turn {
+                    self.turn_in_flight = false;
+                }
+                self.agent_initiated_turn = false;
                 // Same edge, the identity half: anyone holding "the turn I was
                 // admitted against" can now see that it is gone, even if a new
                 // turn sets `turn_in_flight` again before they look.
@@ -1144,8 +1363,10 @@ impl SessionState {
                 self.pending_permission = None;
                 // A blocked `ask_user_question` can't outlive its turn: if the
                 // turn ends (cancel / stop) the card is moot. The backend's
-                // answer one-shot is cleaned via the listener's peer-close race;
-                // this just keeps the snapshot honest.
+                // answer one-shot is declined by the connection loop right after
+                // this event (see the turn exit's question sweep) — usually the
+                // listener's peer-close got there first; this just keeps the
+                // snapshot honest.
                 self.pending_question = None;
                 // Likewise a blocked `exit_plan_mode` approval: the parked ext
                 // responder is drained by the connection's teardown/cancel path;
@@ -1262,6 +1483,8 @@ impl SessionState {
                 agent_type,
                 task_preview,
                 task_id,
+                assistant_id,
+                assistant_name,
                 ..
             } => {
                 // Record the running delegation so the binding is snapshot-
@@ -1279,6 +1502,8 @@ impl SessionState {
                         agent_type: *agent_type,
                         task_preview: task_preview.clone(),
                         task_id: task_id.clone(),
+                        assistant_id: *assistant_id,
+                        assistant_name: assistant_name.clone(),
                     },
                 );
             }
@@ -1390,6 +1615,10 @@ impl SessionState {
                 // How a notice is presented (a toast, kept in the client's own
                 // alert list) is the client's business: storing one here
                 // would bring it back on every snapshot.
+            }
+            AcpEvent::PluginLoadFailures { .. } => {
+                // Same reasoning as a notice: an announcement, kept by the
+                // client's alert list, never re-raised by a snapshot.
             }
             AcpEvent::AsyncTask { delta } => {
                 // The SAME merge the frontend reducer applies, so a client
@@ -1506,6 +1735,31 @@ impl SessionState {
             Some(at) => now.signed_duration_since(at) < background_keepalive_max_age(),
             None => false,
         }
+    }
+
+    /// Claim the next turn for one the agent is starting on its own, unless a
+    /// prompt the manager admitted already owns it. On `true` the caller
+    /// announces the turn (`StatusChanged(Prompting)`); on `false` the admitted
+    /// prompt is about to start and the agent's output streams into it.
+    ///
+    /// Decided under the same lock as the manager's admission check, so the two
+    /// can never both own a turn: a prompt admitted AFTER the claim keeps its
+    /// gate through the agent turn's `TurnComplete` (see
+    /// [`Self::agent_initiated_turn`]).
+    ///
+    /// The turn starts from an empty live message, as the frontend's does at
+    /// `Prompting`: whatever sits in `live_message` now arrived between turns
+    /// (a late frame of the turn before), which no client rendered, and would
+    /// otherwise open this turn's snapshot and its captured result.
+    pub fn begin_agent_initiated_turn(&mut self) -> bool {
+        if self.turn_in_flight {
+            return false;
+        }
+        self.agent_initiated_turn = true;
+        self.live_message = None;
+        self.active_tool_calls.clear();
+        self.qoder_ask_replies.clear();
+        true
     }
 
     /// A single-line "what the sub-agent is doing right now" hint, used by the
@@ -2054,6 +2308,8 @@ impl SessionState {
             config_options: self.config_options.clone(),
             prompt_capabilities: self.prompt_capabilities.clone(),
             usage: self.usage.clone(),
+            prompt_suggestion: self.prompt_suggestion.clone(),
+            remote_control: self.remote_control.clone(),
             fork_supported: self.fork_supported,
             available_commands: self.available_commands.clone(),
             selectors_ready: self.selectors_ready,
@@ -2066,6 +2322,26 @@ impl SessionState {
             event_seq: self.event_seq,
         }
     }
+}
+
+/// Whether someone types the prompts of a connection with this owner label, so
+/// that a predicted follow-up prompt has a composer to appear in.
+///
+/// Not for the owners codeg drives without one: an automation run (owner
+/// `"automation"`, see `automation::engine`), a chat-channel bot (owners
+/// `"chat_channel:<channel>:<sender>…"`, see
+/// `chat_channel::session_commands::owner_label_for`) and a `codeg-cli` run
+/// (owner [`CLI_OWNER_LABEL`](crate::cli_run::service::CLI_OWNER_LABEL)), whose
+/// prompts arrive from a schedule, a messaging app or a command line — and a
+/// `codeg-cli` run lets its connection go as soon as its one turn has ended.
+/// For them a prediction would only be paid for.
+/// Everything else is a person's window, a work task (its session takes
+/// follow-ups once the task stops), or a delegated child (which inherits its
+/// parent's label, and whose session the user can open and continue).
+pub(crate) fn owner_composes_prompts(owner_window_label: &str) -> bool {
+    owner_window_label != "automation"
+        && owner_window_label != crate::cli_run::service::CLI_OWNER_LABEL
+        && !owner_window_label.starts_with("chat_channel:")
 }
 
 /// Max age of the background keep-alive: how long a connection with
@@ -2160,6 +2436,15 @@ pub struct LiveSessionSnapshot {
     pub config_options: Option<Vec<SessionConfigOptionInfo>>,
     pub prompt_capabilities: Option<PromptCapabilitiesInfo>,
     pub usage: Option<UsageInfo>,
+    /// The follow-up prompt the agent last predicted (see
+    /// `SessionState.prompt_suggestion`). Omitted when there is none, so the
+    /// common snapshot keeps its pre-feature wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_suggestion: Option<String>,
+    /// Claude Code's Remote Control while it is on (see
+    /// `SessionState.remote_control`). Omitted when it is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_control: Option<RemoteControlInfo>,
     pub fork_supported: bool,
     pub available_commands: Vec<AvailableCommandInfo>,
     pub selectors_ready: bool,
@@ -2498,6 +2783,8 @@ mod tests {
             usage: None,
             output_file_path: None,
             tool_call_id: None,
+            phase: None,
+            current_agent: None,
         }
     }
 
@@ -2677,6 +2964,94 @@ mod tests {
         });
         assert!(s.async_tasks.is_empty());
         assert!(!s.has_active_background_work(Utc::now()));
+    }
+
+    /// A turn the agent started itself (Grok's follow-up to a background
+    /// workflow) never took the prompt gate, so its end must not release it: a
+    /// prompt admitted while it ran owns the flag until ITS turn completes.
+    #[test]
+    fn an_agent_initiated_turn_end_leaves_an_admitted_prompts_gate() {
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "a late frame of the turn before".into(),
+            parent_tool_use_id: None,
+        });
+        assert!(s.begin_agent_initiated_turn());
+        assert!(s.live_message.is_none(), "the turn starts from a clean slate");
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Prompting,
+        });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "report".into(),
+            parent_tool_use_id: None,
+        });
+        // The manager admits a prompt mid-way.
+        s.turn_in_flight = true;
+        s.apply_event(&AcpEvent::TurnComplete {
+            session_id: "ext".into(),
+            stop_reason: "cancelled".into(),
+            agent_type: "grok".into(),
+        });
+        assert!(s.turn_in_flight, "the admitted prompt still owns the gate");
+        assert!(!s.agent_initiated_turn);
+        assert_eq!(s.last_assistant_text.as_deref(), Some("report"));
+
+        // The prompt's own turn then releases it as always.
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Prompting,
+        });
+        s.apply_event(&AcpEvent::TurnComplete {
+            session_id: "ext".into(),
+            stop_reason: "end_turn".into(),
+            agent_type: "grok".into(),
+        });
+        assert!(!s.turn_in_flight);
+    }
+
+    /// An admitted prompt owns the next turn: the agent's own output then
+    /// streams into it rather than into a turn of its own.
+    #[test]
+    fn an_agent_initiated_turn_yields_to_an_admitted_prompt() {
+        let mut s = fresh_state();
+        s.turn_in_flight = true;
+        assert!(!s.begin_agent_initiated_turn());
+        assert!(!s.agent_initiated_turn);
+    }
+
+    /// Text the agent sends between turns still lands in `live_message`, but a
+    /// prompted turn starts from an empty one — as every client's reducer does
+    /// at `Prompting` — so neither the snapshot a mid-turn attach renders nor
+    /// the result the turn hands a delegation parent opens with it.
+    #[test]
+    fn a_prompted_turn_starts_from_an_empty_live_message() {
+        let text = |text: &str| AcpEvent::ContentDelta {
+            text: text.into(),
+            parent_tool_use_id: None,
+        };
+        let mut s = fresh_state();
+        s.apply_event(&text("The job finished."));
+        assert!(s.live_message.is_some());
+
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Prompting,
+        });
+        assert!(s.live_message.is_none());
+
+        s.apply_event(&text("You're welcome."));
+        let live = s
+            .to_snapshot()
+            .live_message
+            .expect("the turn's live message");
+        assert!(matches!(
+            live.content.as_slice(),
+            [LiveContentBlock::Text { text, .. }] if text == "You're welcome."
+        ));
+        s.apply_event(&AcpEvent::TurnComplete {
+            session_id: "ext".into(),
+            stop_reason: "end_turn".into(),
+            agent_type: "claude_code".into(),
+        });
+        assert_eq!(s.last_assistant_text.as_deref(), Some("You're welcome."));
     }
 
     #[test]
@@ -3050,6 +3425,172 @@ mod tests {
             s.to_snapshot().last_error.is_none(),
             "new prompts clear stale snapshot-recoverable errors"
         );
+    }
+
+    /// The predicted follow-up prompt is current state: the snapshot hands it to
+    /// a client that attaches between turns, until the adapter withdraws it, a
+    /// prompt spends it, or the connection moves to another session.
+    #[test]
+    fn snapshot_carries_the_predicted_prompt_until_it_is_spent() {
+        let mut s = fresh_state();
+        assert!(
+            !serde_json::to_string(&s.to_snapshot())
+                .expect("serialize")
+                .contains("prompt_suggestion"),
+            "no prediction: the snapshot keeps its pre-feature wire shape"
+        );
+
+        s.apply_event(&AcpEvent::PromptSuggestion {
+            text: Some("Run the tests".into()),
+        });
+        let snap = s.to_snapshot();
+        assert_eq!(snap.prompt_suggestion.as_deref(), Some("Run the tests"));
+        let back: LiveSessionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snap).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(back.prompt_suggestion.as_deref(), Some("Run the tests"));
+
+        // Withdrawn by the adapter.
+        s.apply_event(&AcpEvent::PromptSuggestion { text: None });
+        assert_eq!(s.to_snapshot().prompt_suggestion, None);
+
+        // Spent by the next prompt, whatever it says.
+        s.apply_event(&AcpEvent::PromptSuggestion {
+            text: Some("Run the tests".into()),
+        });
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Prompting,
+        });
+        assert_eq!(s.to_snapshot().prompt_suggestion, None);
+
+        // Ending a turn keeps what arrives after it.
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Connected,
+        });
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "s1".into(),
+        });
+        s.apply_event(&AcpEvent::PromptSuggestion {
+            text: Some("commit this".into()),
+        });
+        // The same session announced again keeps it; another one (a fork)
+        // drops it, since it predicted what follows the session left behind.
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "s1".into(),
+        });
+        assert_eq!(s.prompt_suggestion.as_deref(), Some("commit this"));
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "s2".into(),
+        });
+        assert_eq!(s.prompt_suggestion, None);
+    }
+
+    /// Remote Control is current state: the snapshot carries it while it is on,
+    /// and it goes when the adapter turns it off, when the connection moves to
+    /// another session (codeg closes the one a fork leaves, and its CLI with
+    /// it), and when the connection dies.
+    #[test]
+    fn snapshot_carries_remote_control_while_its_cli_runs() {
+        let on = || AcpEvent::RemoteControl {
+            remote_control: Some(RemoteControlInfo {
+                session_url: Some("https://claude.ai/code/session_01".into()),
+            }),
+        };
+        let mut s = fresh_state();
+        assert!(
+            !serde_json::to_string(&s.to_snapshot())
+                .expect("serialize")
+                .contains("remote_control"),
+            "off: the snapshot keeps its pre-feature wire shape"
+        );
+
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "s1".into(),
+        });
+        s.apply_event(&on());
+        let snap = s.to_snapshot();
+        let back: LiveSessionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snap).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            back.remote_control
+                .as_ref()
+                .and_then(|rc| rc.session_url.as_deref()),
+            Some("https://claude.ai/code/session_01")
+        );
+
+        // Turns come and go without touching it.
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Prompting,
+        });
+        s.apply_event(&AcpEvent::StatusChanged {
+            status: ConnectionStatus::Connected,
+        });
+        assert!(s.remote_control.is_some());
+
+        // Turned off.
+        s.apply_event(&AcpEvent::RemoteControl {
+            remote_control: None,
+        });
+        assert_eq!(s.to_snapshot().remote_control, None);
+
+        // The same session announced again keeps it; a fork drops it.
+        s.apply_event(&on());
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "s1".into(),
+        });
+        assert!(s.remote_control.is_some());
+        s.apply_event(&AcpEvent::SessionStarted {
+            session_id: "s2".into(),
+        });
+        assert_eq!(s.remote_control, None);
+
+        // A connection that dies takes it along.
+        for status in [ConnectionStatus::Disconnected, ConnectionStatus::Error] {
+            s.apply_event(&on());
+            s.apply_event(&AcpEvent::StatusChanged { status });
+            assert_eq!(s.remote_control, None);
+        }
+    }
+
+    /// The owners codeg drives without a composer ask for no predicted prompt;
+    /// every other one does, decided once when the state is made.
+    #[test]
+    fn only_owners_someone_types_into_ask_for_predicted_prompts() {
+        for owner in [
+            "main",
+            "workspace-2",
+            "work_task",
+            "delegation-probe",
+            "automations",
+        ] {
+            assert!(owner_composes_prompts(owner), "{owner}");
+        }
+        for owner in [
+            "automation",
+            crate::cli_run::service::CLI_OWNER_LABEL,
+            "chat_channel:4:wx-user",
+            "chat_channel:4:tg-user:thread:9",
+        ] {
+            assert!(!owner_composes_prompts(owner), "{owner}");
+        }
+        assert!(fresh_state().wants_prompt_suggestions);
+        let automation = SessionState::new(
+            "conn-auto".to_string(),
+            AgentType::ClaudeCode,
+            None,
+            "automation".to_string(),
+            None,
+        );
+        assert!(!automation.wants_prompt_suggestions);
+        let cli_run = SessionState::new(
+            "conn-cli".to_string(),
+            AgentType::ClaudeCode,
+            None,
+            crate::cli_run::service::CLI_OWNER_LABEL.to_string(),
+            None,
+        );
+        assert!(!cli_run.wants_prompt_suggestions);
     }
 
     #[test]
@@ -4015,6 +4556,8 @@ mod tests {
             agent_type: AgentType::Codex,
             task_preview: "run the tests".into(),
             task_id: "task-ss-1".into(),
+            assistant_id: None,
+            assistant_name: None,
         }
     }
 
@@ -4029,6 +4572,8 @@ mod tests {
                 duration_ms: 1,
                 text_preview: None,
             },
+            assistant_id: None,
+            assistant_name: None,
         }
     }
 
@@ -4399,6 +4944,8 @@ mod tests {
 
         s.apply_event(&AcpEvent::PermissionResolved {
             request_id: "p-1".into(),
+            option_id: None,
+            origin: None,
         });
         assert!(
             s.pending_permission.is_none(),
@@ -4449,6 +4996,8 @@ mod tests {
 
         s.apply_event(&AcpEvent::PermissionResolved {
             request_id: "p-stale".into(),
+            option_id: None,
+            origin: None,
         });
         let p = s
             .pending_permission
