@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - ci/pr845-conflict-20261018
   pull_request:
 
 env:
