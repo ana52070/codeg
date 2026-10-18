@@ -1,4 +1,5 @@
 pub mod agent_mentions;
+pub mod air_contract;
 pub mod agent_process;
 pub mod agent_session;
 pub mod antigravity_login;
@@ -7,8 +8,11 @@ pub mod binary_cache;
 pub mod browser_tools;
 pub mod chat_authoring;
 pub mod codex_catalog_source;
+pub mod codex_context;
 pub mod codex_goal;
 pub mod codex_model_catalog;
+pub mod command_code;
+pub mod computer_tools;
 pub mod connection;
 pub mod cursor_acp_retry_compat;
 pub mod cursor_ext;
@@ -22,9 +26,12 @@ pub mod fork;
 pub mod host_tools_policy;
 pub mod idle_sweep;
 pub mod internal_bus;
+pub mod js_text;
+pub mod latest_release;
 pub mod lifecycle;
 pub mod manager;
 pub mod opencode_catalog;
+pub mod opencode_launch;
 pub mod opencode_plugins;
 pub mod plan_approval;
 pub mod preflight;
@@ -32,15 +39,19 @@ pub mod prompt_hydration;
 pub mod question;
 pub mod registry;
 pub mod remote_registry;
+pub mod result_tool;
 pub mod scratch_dir;
+pub mod service_error;
 pub mod session_info;
 pub mod session_title;
 pub mod session_state;
 pub mod stderr_tail;
 pub mod temp_reclaim;
 pub mod terminal_runtime;
+pub mod trae;
 pub mod types;
 pub mod work_task_tools;
+pub mod zcode;
 
 pub use idle_sweep::{idle_sweep_task, idle_timeout_from_env, SWEEP_INTERVAL_SECS};
 pub use internal_bus::{EventBusMetrics, EventBusMetricsSnapshot, InternalEventBus};
@@ -70,11 +81,10 @@ pub use types::{
 /// sidebar on every restart. The second is codeg#500, where the split is the
 /// whole point.
 ///
-/// Empty — and free — for every built-in agent: their history lives in the
-/// agent's own store, codeg records no transcript, and so nothing can ever be
-/// carried forward. Only custom agents can produce a non-empty answer.
+/// Empty for agents with native history stores. Custom agents and ZCode
+/// use Codeg transcripts and can carry continuation ancestors forward.
 pub fn continued_session_ids(agent_type: crate::models::AgentType, session_id: &str) -> Vec<String> {
-    if agent_type.custom_id().is_none() {
+    if !agent_type.uses_acp_transcript() {
         return Vec::new();
     }
     crate::acp_transcript::continuation_ancestors(registry::registry_id_for(agent_type), session_id)

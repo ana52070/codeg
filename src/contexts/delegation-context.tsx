@@ -20,11 +20,13 @@
  * them visible at all. The permission store stays per-connection — a child's
  * `permission_request` is never re-keyed onto the parent's ToolCallBlock — but
  * because the child IS a connection in the store, `useDelegationCardModel`
- * reads its `pendingPermission` directly and badges the delegation card
- * "waiting", and `SubAgentSessionDialog` answers through the child's own
- * connection id. Surfaces OUTSIDE this transcript (the pet badge/panel, the
- * work-task row, `get_delegation_status`) are handled in the backend, not here
- * — see `pet_list_active_sessions_core` and the broker's `blocked_on` (#447).
+ * reads its pending prompts directly and badges the delegation card
+ * "waiting", and both `SubAgentSessionDialog` and the `get_delegation_status`
+ * row (`useDelegationTaskLive`, found by task id) answer through the child's
+ * own connection id. Surfaces OUTSIDE this transcript (the pet badge/panel,
+ * the work-task row, the parent LLM's view of `get_delegation_status`) are
+ * handled in the backend, not here — see `pet_list_active_sessions_core` and
+ * the broker's `blocked_on` (#447).
  */
 
 import {
@@ -39,7 +41,11 @@ import {
 } from "react"
 
 import type { AgentType, EventEnvelope } from "@/lib/types"
-import { useAcpActions, useAcpEvent } from "@/contexts/acp-connections-context"
+import {
+  type AcpEventDelivery,
+  useAcpActions,
+  useAcpEvent,
+} from "@/contexts/acp-connections-context"
 
 export type DelegationStatus = "running" | "ok" | "err"
 
@@ -57,6 +63,10 @@ export interface DelegationBinding {
   task: string | null
   /** Broker-minted task id from `delegation_started`. */
   taskId: string | null
+  /** The assistant the child runs as (then `agentType` is ITS agent), and its
+   *  name when the delegation started; null for a plain agent delegation. */
+  assistantId: number | null
+  assistantName: string | null
 }
 
 interface DelegationContextValue {
@@ -79,6 +89,12 @@ export function useDelegation(): DelegationContextValue {
     throw new Error("useDelegation must be used within DelegationProvider")
   }
   return ctx
+}
+
+/** The lookups, or `null` outside `DelegationProvider` — for a card that only
+ *  enriches itself from a live binding when there is one. */
+export function useOptionalDelegation(): DelegationContextValue | null {
+  return useContext(DelegationContext)
 }
 
 /** Grace period after `delegation_completed` before tearing down the
@@ -123,7 +139,7 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const handleEnvelope = useCallback(
-    (envelope: EventEnvelope) => {
+    (envelope: EventEnvelope, delivery?: AcpEventDelivery) => {
       if (envelope.type === "delegation_started") {
         const next: DelegationBinding = {
           parentConnectionId: envelope.parent_connection_id,
@@ -134,6 +150,8 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
           status: "running",
           task: envelope.task_preview ?? null,
           taskId: envelope.task_id ?? null,
+          assistantId: envelope.assistant_id ?? null,
+          assistantName: envelope.assistant_name ?? null,
         }
         setByToolUseId((prev) => {
           const m = new Map(prev)
@@ -147,12 +165,16 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
         cancelDetachTimer(envelope.parent_tool_use_id)
         // Pull the child connection into the reducer so its
         // streaming text / tool calls / pendingPermission reach
-        // the parent's DelegatedSubThread inline.
+        // the parent's DelegatedSubThread inline. A binding re-seeded from
+        // the parent's snapshot names a child that is already mid-turn —
+        // possibly parked on a permission it raised before this client
+        // attached — so that one is hydrated from the child's own snapshot.
         attachRef.current({
           connectionId: envelope.child_connection_id,
           parentConnectionId: envelope.parent_connection_id,
           parentToolUseId: envelope.parent_tool_use_id,
           agentType: envelope.agent_type,
+          hydrate: delivery?.seededFromSnapshot === true,
         })
         return
       }
@@ -175,6 +197,8 @@ export function DelegationProvider({ children }: { children: ReactNode }) {
             // label; the card recovers it from the terminal meta instead.
             task: null,
             taskId: null,
+            assistantId: envelope.assistant_id ?? null,
+            assistantName: envelope.assistant_name ?? null,
           }
           const updated: DelegationBinding =
             envelope.result.kind === "ok"

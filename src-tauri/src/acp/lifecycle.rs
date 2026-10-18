@@ -22,13 +22,12 @@ use crate::acp::delegation::broker::{DelegationBroker, DelegationMatchKey};
 use crate::acp::delegation::types::{DelegationError, DelegationOutcome, DelegationSuccess};
 use crate::acp::internal_bus::InternalEventBus;
 use crate::acp::manager::ConnectionManager;
-use crate::acp::session_state::SessionState;
+use crate::acp::session_state::{SessionState, TurnStatusWriter};
 use crate::acp::types::{AcpEvent, ConnectionStatus, EventEnvelope};
 use crate::db::entities::conversation::ConversationStatus;
 use crate::db::error::DbError;
 use crate::db::service::conversation_service;
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
-use crate::models::AgentType;
 use crate::web::event_bridge::{emit_with_state, EventEmitter};
 use tokio::sync::RwLock;
 
@@ -185,6 +184,68 @@ async fn handle_event_with_retry(
             }
         }
     }
+    // Given up. A turn's status write is released, so a CLI run's fallback —
+    // the one other writer — may still make it.
+    if matches!(envelope.payload, AcpEvent::TurnComplete { .. }) {
+        if let Some(state) = manager.get_state(&envelope.connection_id).await {
+            state
+                .write()
+                .await
+                .release_turn_status(envelope.seq, TurnStatusWriter::Lifecycle);
+        }
+    }
+}
+
+/// The conversation status a `TurnComplete` with `stop_reason` leaves the row
+/// in. `end_turn` is the only success case and goes to `PendingReview`.
+/// `refusal`, `max_tokens`, `max_turn_requests`, `unknown`, `empty`,
+/// `auth_required` and `rejected` indicate the turn failed (often a
+/// backend/gateway error masquerading as `Refusal` per the ACP spec gap, or —
+/// common with OpenCode — a silent EndTurn that produced no output), so they go
+/// to `Cancelled`, paired with an `AcpEvent::Error` toast emitted upstream by
+/// `connection.rs`. `auth_required` and `rejected` are the ones whose
+/// CONNECTION survives (the agent rejected the prompt — with ACP's -32000 when
+/// it wants the user to sign in, with anything else when it simply would not
+/// run this one), but their turn is just as dead as the others — leaving those
+/// rows out would strand them at InProgress for good. `cancelled` is already
+/// written by `manager.cancel()` (eager CAS InProgress → Cancelled at the
+/// user-cancel entry point), so it — and any future reason — writes nothing.
+pub(crate) fn turn_complete_status(stop_reason: &str) -> Option<ConversationStatus> {
+    match stop_reason {
+        "end_turn" => Some(ConversationStatus::PendingReview),
+        "refusal" | "max_tokens" | "max_turn_requests" | "unknown" | "empty" | "auth_required"
+        | "rejected" => Some(ConversationStatus::Cancelled),
+        _ => None,
+    }
+}
+
+/// The conversation-status write a `TurnComplete` makes: the row first, then
+/// `ConversationStatusChanged`, so any subscriber that observes the event can
+/// assume the row is already at the target status. Shared by the lifecycle
+/// worker and a CLI run's fallback for a turn the worker never got; whichever
+/// claimed the turn (`SessionState::claim_turn_status`) is the one that calls
+/// it.
+pub(crate) async fn write_turn_status(
+    db_conn: &DatabaseConnection,
+    state: &Arc<RwLock<SessionState>>,
+    emitter: &EventEmitter,
+    conversation_id: i32,
+    stop_reason: &str,
+) -> Result<(), DbError> {
+    let Some(status) = turn_complete_status(stop_reason) else {
+        return Ok(());
+    };
+    conversation_service::update_status(db_conn, conversation_id, status.clone()).await?;
+    emit_with_state(
+        state,
+        emitter,
+        AcpEvent::ConversationStatusChanged {
+            conversation_id,
+            status,
+        },
+    )
+    .await;
+    Ok(())
 }
 
 pub(crate) async fn handle_event(
@@ -265,21 +326,22 @@ pub(crate) async fn handle_event(
             // CAS InProgress → Cancelled at the user-cancel entry point), so
             // we leave it alone here. `completed` transitions remain
             // frontend-driven.
-            let target_status = match stop_reason.as_str() {
-                "end_turn" => Some(ConversationStatus::PendingReview),
-                "refusal" | "max_tokens" | "max_turn_requests" | "unknown" | "empty"
-                | "auth_required" | "rejected" => Some(ConversationStatus::Cancelled),
-                // `cancelled` and any future reason: don't write here.
-                _ => None,
-            };
             let Some((state_arc, emitter)) =
                 manager.get_state_and_emitter(&envelope.connection_id).await
             else {
                 return Ok(());
             };
-            let (conversation_id, last_text) = {
-                let snap = state_arc.read().await;
-                (snap.conversation_id, snap.last_assistant_text.clone())
+            let (conversation_id, last_text, claimed) = {
+                let mut snap = state_arc.write().await;
+                // Re-entrant for this worker: a retry of this same envelope
+                // claims again and goes on. Only a CLI run's fallback that
+                // already wrote this turn's status makes it skip.
+                let claimed = snap.claim_turn_status(envelope.seq, TurnStatusWriter::Lifecycle);
+                (
+                    snap.conversation_id,
+                    snap.last_assistant_text.clone(),
+                    claimed,
+                )
             };
             // No conversation row bound (defensive — should never happen in
             // practice since `send_prompt_linked` runs before TurnComplete can
@@ -287,20 +349,8 @@ pub(crate) async fn handle_event(
             let Some(cid) = conversation_id else {
                 return Ok(());
             };
-            if let Some(ts) = target_status.clone() {
-                // DB write before emit so any downstream subscriber that observes
-                // the ConversationStatusChanged event can assume the row is
-                // already at the target status.
-                conversation_service::update_status(db_conn, cid, ts.clone()).await?;
-                emit_with_state(
-                    &state_arc,
-                    &emitter,
-                    AcpEvent::ConversationStatusChanged {
-                        conversation_id: cid,
-                        status: ts,
-                    },
-                )
-                .await;
+            if claimed {
+                write_turn_status(db_conn, &state_arc, &emitter, cid, stop_reason).await?;
             }
 
             // If this conversation was spawned by a delegation, resolve the
@@ -625,9 +675,13 @@ fn find_delegation_args(
     }
     let obj = value.as_object()?;
     // Direct hit: this object declares a delegation field at its top level.
+    // `assistant_id` counts whether a host sent it as a number or a string.
     if obj.get("task").and_then(|v| v.as_str()).is_some()
         || obj.get("agent_type").and_then(|v| v.as_str()).is_some()
         || obj.get("working_dir").and_then(|v| v.as_str()).is_some()
+        || obj
+            .get("assistant_id")
+            .is_some_and(|v| v.is_number() || v.is_string())
     {
         return Some(obj.clone());
     }
@@ -660,11 +714,11 @@ pub(crate) const CURSOR_IDENTITYLESS_MCP_TITLE: &str = "MCP: tool";
 ///   rephrase it (`Delegate to codex`). We match by substring so any
 ///   form containing `delegate_to_agent` is captured.
 /// * `raw_input` is the JSON arg blob the agent sent to the MCP server. The
-///   `delegate_to_agent` schema requires `agent_type` AND `task`; presence
-///   of both — after peeling any wrapper layers via [`find_delegation_args`] —
-///   is a near-zero false-positive shape check that catches any host that
-///   mangles the title beyond recognition, including ones that wrap their
-///   tool-call args.
+///   `delegate_to_agent` schema requires `task` plus a target — `agent_type`,
+///   or `assistant_id` for an assistant; `task` with either — after peeling
+///   any wrapper layers via [`find_delegation_args`] — is a near-zero
+///   false-positive shape check that catches any host that mangles the title
+///   beyond recognition, including ones that wrap their tool-call args.
 fn is_delegation_invocation(title: &str, raw_input: Option<&str>) -> bool {
     let normalized_title = title.to_ascii_lowercase().replace([' ', '-'], "_");
     if normalized_title.contains("delegate_to_agent") {
@@ -675,7 +729,10 @@ fn is_delegation_invocation(title: &str, raw_input: Option<&str>) -> bool {
             if let Some(args) = find_delegation_args(&v, 0) {
                 let has_task = args.get("task").and_then(|t| t.as_str()).is_some();
                 let has_agent_type = args.get("agent_type").and_then(|a| a.as_str()).is_some();
-                if has_task && has_agent_type {
+                let has_assistant_id = args
+                    .get("assistant_id")
+                    .is_some_and(|v| v.is_number() || v.is_string());
+                if has_task && (has_agent_type || has_assistant_id) {
                     return true;
                 }
             }
@@ -703,15 +760,16 @@ fn extract_delegation_match_key(raw_input: Option<&str>) -> Option<DelegationMat
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
     let args = find_delegation_args(&parsed, 0)?;
     let task = args.get("task").and_then(|v| v.as_str())?.to_string();
-    // Parse `agent_type` through the same serde path the MCP listener uses,
-    // so the stored enum equals `DelegationRequest::agent_type`.
-    let agent_type: AgentType = serde_json::from_value(args.get("agent_type")?.clone()).ok()?;
     let working_dir = args
         .get("working_dir")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let args = serde_json::Value::Object(args);
+    // The same parser the MCP listener dispatches the call with, so the
+    // target here equals `DelegationRequest::target()` for the same arguments.
+    let target = crate::acp::delegation::types::delegation_target_from_args(&args).ok()?;
     Some(DelegationMatchKey {
-        agent_type,
+        target,
         task,
         working_dir,
     })
@@ -898,9 +956,48 @@ mod delegation_title_tests {
     fn extract_match_key_pulls_agent_task_and_dir() {
         let raw = r#"{"agent_type":"codex","task":"smoke test","working_dir":"/tmp"}"#;
         let key = extract_delegation_match_key(Some(raw)).expect("key parses");
-        assert_eq!(key.agent_type, AgentType::Codex);
+        assert_eq!(
+            key.target,
+            crate::acp::delegation::types::DelegationTarget::Agent(AgentType::Codex)
+        );
         assert_eq!(key.task, "smoke test");
         assert_eq!(key.working_dir.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn an_assistant_call_is_keyed_by_its_assistant_never_its_agent_type() {
+        use crate::acp::delegation::types::DelegationTarget;
+        // The host may fill `agent_type` with anything when it names an
+        // assistant: the broker keys the call by the assistant, so must we.
+        for raw in [
+            r#"{"assistant_id":3,"task":"review"}"#,
+            r#"{"assistant_id":"3","agent_type":"codex","task":"review"}"#,
+            r#"{"params":{"input":{"assistant_id":3,"agent_type":"garbage","task":"review"}}}"#,
+        ] {
+            let key = extract_delegation_match_key(Some(raw)).expect("assistant key parses");
+            assert_eq!(key.target, DelegationTarget::Assistant(3), "{raw}");
+            assert_eq!(key.task, "review");
+        }
+        // An invalid id is no key at all (the listener refuses the call).
+        assert!(
+            extract_delegation_match_key(Some(r#"{"assistant_id":0,"task":"x"}"#)).is_none()
+        );
+    }
+
+    #[test]
+    fn an_assistant_call_is_recognized_by_its_shape() {
+        assert!(is_delegation_invocation(
+            "some host title",
+            Some(r#"{"assistant_id":3,"task":"review"}"#)
+        ));
+        assert!(is_delegation_invocation(
+            "some host title",
+            Some(r#"{"arguments":{"assistant_id":"3","task":"review"}}"#)
+        ));
+        assert!(!is_delegation_invocation(
+            "some host title",
+            Some(r#"{"assistant_id":3}"#)
+        ));
     }
 
     #[test]
@@ -934,7 +1031,10 @@ mod delegation_title_tests {
         // `findDelegationArgs` walker in delegated-sub-thread.tsx).
         let nested = r#"{"params":{"input":{"agent_type":"codex","task":"t","working_dir":"/w"}}}"#;
         let key = extract_delegation_match_key(Some(nested)).expect("nested key parses");
-        assert_eq!(key.agent_type, AgentType::Codex);
+        assert_eq!(
+            key.target,
+            crate::acp::delegation::types::DelegationTarget::Agent(AgentType::Codex)
+        );
         assert_eq!(key.task, "t");
         assert_eq!(key.working_dir.as_deref(), Some("/w"));
 
@@ -959,7 +1059,10 @@ mod delegation_title_tests {
         let inner = r#"{"agent_type":"codex","task":"double"}"#;
         let double = serde_json::Value::String(inner.to_string()).to_string();
         let key = extract_delegation_match_key(Some(&double)).expect("double-encoded parses");
-        assert_eq!(key.agent_type, AgentType::Codex);
+        assert_eq!(
+            key.target,
+            crate::acp::delegation::types::DelegationTarget::Agent(AgentType::Codex)
+        );
         assert_eq!(key.task, "double");
     }
 
@@ -1115,7 +1218,7 @@ mod delegation_registration_tests {
 
     fn codex_key(task: &str) -> DelegationMatchKey {
         DelegationMatchKey {
-            agent_type: AgentType::Codex,
+            target: crate::acp::delegation::types::DelegationTarget::Agent(AgentType::Codex),
             task: task.to_string(),
             working_dir: None,
         }
@@ -1794,6 +1897,7 @@ mod tests {
             status: crate::acp::types::ConnectionStatus::Connected,
             owner_window_label: "test-window".to_string(),
             cmd_tx: tx,
+            handshake: tokio_util::sync::CancellationToken::new(),
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2185,6 +2289,117 @@ mod tests {
             read_row_status(&db, conv.id).await,
             ConversationStatus::PendingReview
         );
+    }
+
+    /// A turn whose status a CLI run's fallback already wrote is skipped
+    /// whole — a late lifecycle write must not overwrite what the user did to
+    /// the row after the fallback — while the worker's own retries of the same
+    /// envelope keep their claim.
+    #[tokio::test]
+    async fn handle_event_skips_a_turn_the_cli_fallback_claimed() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/turn-claimed").await;
+        let conv =
+            conversation_service::create(&db.conn, folder_id, AgentType::ClaudeCode, None, None)
+                .await
+                .unwrap();
+        let mgr = ConnectionManager::new();
+        let conn = fake_connection_with_state("c1", Some(conv.id));
+        let state = conn.state.clone();
+        mgr.connections.lock().await.insert("c1".to_string(), conn);
+        let turn = |seq| EventEnvelope {
+            seq,
+            connection_id: "c1".to_string(),
+            payload: AcpEvent::TurnComplete {
+                session_id: "ext-1".into(),
+                stop_reason: "end_turn".into(),
+                agent_type: "claude_code".into(),
+            },
+        };
+
+        assert!(state
+            .write()
+            .await
+            .claim_turn_status(7, TurnStatusWriter::CliFallback));
+        // The fallback wrote, then the user marked the conversation done.
+        conversation_service::update_status(&db.conn, conv.id, ConversationStatus::Completed)
+            .await
+            .unwrap();
+        handle_event(&db.conn, &mgr, &turn(7), None).await.unwrap();
+        assert_eq!(
+            read_row_status(&db, conv.id).await,
+            ConversationStatus::Completed,
+            "the late lifecycle write was skipped"
+        );
+
+        // The next turn is the worker's again, retries included.
+        handle_event(&db.conn, &mgr, &turn(9), None).await.unwrap();
+        assert_eq!(
+            read_row_status(&db, conv.id).await,
+            ConversationStatus::PendingReview
+        );
+        conversation_service::update_status(&db.conn, conv.id, ConversationStatus::InProgress)
+            .await
+            .unwrap();
+        handle_event(&db.conn, &mgr, &turn(9), None).await.unwrap();
+        assert_eq!(
+            read_row_status(&db, conv.id).await,
+            ConversationStatus::PendingReview,
+            "a retry of its own envelope still writes"
+        );
+        assert!(!state
+            .write()
+            .await
+            .claim_turn_status(9, TurnStatusWriter::CliFallback));
+    }
+
+    #[tokio::test]
+    async fn a_turn_status_the_worker_gives_up_on_is_left_to_the_fallback() {
+        let db = test_helpers::fresh_in_memory_db().await;
+        let folder_id = test_helpers::seed_folder(&db, "/tmp/turn-given-up").await;
+        let conv =
+            conversation_service::create(&db.conn, folder_id, AgentType::ClaudeCode, None, None)
+                .await
+                .unwrap();
+        let mgr = ConnectionManager::new();
+        let conn = fake_connection_with_state("c1", Some(conv.id));
+        let state = conn.state.clone();
+        mgr.connections.lock().await.insert("c1".to_string(), conn);
+        let turn = EventEnvelope {
+            seq: 4,
+            connection_id: "c1".to_string(),
+            payload: AcpEvent::TurnComplete {
+                session_id: "ext-1".into(),
+                stop_reason: "end_turn".into(),
+                agent_type: "claude_code".into(),
+            },
+        };
+        // Every attempt fails.
+        db.conn.clone().close().await.unwrap();
+
+        handle_event_with_retry(&db.conn, &mgr, &turn, None).await;
+
+        assert!(
+            state
+                .write()
+                .await
+                .claim_turn_status(4, TurnStatusWriter::CliFallback),
+            "the worker let go of the turn it could not write"
+        );
+    }
+
+    #[test]
+    fn only_the_holder_of_a_turn_can_let_it_go() {
+        let mut s = SessionState::new("c".into(), AgentType::ClaudeCode, None, "w".into(), None);
+        assert!(s.claim_turn_status(3, TurnStatusWriter::Lifecycle));
+        s.release_turn_status(3, TurnStatusWriter::CliFallback);
+        s.release_turn_status(2, TurnStatusWriter::Lifecycle);
+        assert!(
+            !s.claim_turn_status(3, TurnStatusWriter::CliFallback),
+            "still held"
+        );
+        s.release_turn_status(3, TurnStatusWriter::Lifecycle);
+        assert!(s.claim_turn_status(3, TurnStatusWriter::CliFallback));
     }
 
     #[tokio::test]
@@ -3006,6 +3221,7 @@ mod tests {
             working_dir: None,
             requested_working_dir: None,
             external_handle: None,
+            assistant: None,
         }
     }
 

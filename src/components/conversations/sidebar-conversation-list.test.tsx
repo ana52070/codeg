@@ -6,15 +6,25 @@ import {
   useImperativeHandle,
   useState,
 } from "react"
-import { act, fireEvent, render } from "@testing-library/react"
+import { act, fireEvent, render, within } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { toast } from "sonner"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest"
 
 import {
   SidebarConversationList,
   type SidebarConversationListHandle,
 } from "./sidebar-conversation-list"
 import type { DbConversationSummary, FolderDetail } from "@/lib/types"
+import type { TagFilter } from "@/lib/conversation-tags"
 import {
   resetAppWorkspaceStore,
   useAppWorkspaceStore,
@@ -242,7 +252,31 @@ vi.mock("@/contexts/workbench-route-context", () => {
 vi.mock("./conversation-manage-dialog", () => ({
   ConversationManageDialog: () => null,
 }))
-vi.mock("@/components/layout/clone-dialog", () => ({ CloneDialog: () => null }))
+
+// The two "add a folder" dialogs matter here only for what the list hands them
+// — whether they are open, and what happens to the folder they report — so
+// they render nothing and record their latest props.
+type FolderDialogProbe = {
+  open: boolean
+  onFolderOpened?: (folder: FolderDetail) => void
+}
+const folderDialogs = vi.hoisted(() => ({
+  clone: null as FolderDialogProbe | null,
+  browser: null as FolderDialogProbe | null,
+}))
+vi.mock("@/components/layout/clone-dialog", () => ({
+  CloneDialog: (props: FolderDialogProbe) => {
+    folderDialogs.clone = props
+    return null
+  },
+}))
+vi.mock("@/components/layout/workspace-folder-dialog", () => ({
+  WorkspaceFolderDialog: (props: FolderDialogProbe & { folder?: unknown }) => {
+    // The links manager (opened ON a folder) is a separate instance.
+    if (!props.folder) folderDialogs.browser = props
+    return null
+  },
+}))
 // The sub-session realtime sync hook reaches @/lib/platform (transport), which
 // these tests don't load; stub it to a no-op — it has its own unit tests.
 vi.mock("@/hooks/use-subsession-sync", () => ({ useSubsessionSync: () => {} }))
@@ -485,7 +519,7 @@ function firePointer(
 }
 
 describe("SidebarConversationList — folder drag gesture", () => {
-  let rectSpy: ReturnType<typeof vi.spyOn>
+  let rectSpy: MockInstance
 
   beforeEach(() => {
     vi.useFakeTimers({ now: FIXED })
@@ -1297,6 +1331,108 @@ describe("SidebarConversationList — Recent section", () => {
       )
     })
   })
+
+  describe("kind filter", () => {
+    const FILTER_KEY = "workspace:sidebar-recent-filter"
+    const { noRecent, noRecentChats, noRecentFolders } =
+      enMessages.Folder.sidebar
+
+    // Cards rendered for one conversation: its canonical row (Folders or
+    // Chat), plus a second one while Recent lists it too.
+    const cardsFor = (id: number) =>
+      document.querySelectorAll(`[data-conversation-id="${id}"]`).length
+
+    // Radix arms its outside-pointer listener in a `setTimeout(0)` and jsdom has
+    // no `PointerEvent`, so drive the header menu with real `MouseEvent`s under
+    // the pointer-event names (same recipe as sidebar-section-header.test.tsx).
+    async function settle() {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    }
+    function press(target: Element) {
+      for (const type of ["pointerdown", "pointerup", "click"]) {
+        fireEvent(
+          target,
+          new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 })
+        )
+      }
+    }
+    // Open the header menu from the trigger carrying `triggerLabel` and pick
+    // the option whose text is `option`.
+    async function pick(triggerLabel: string, option: string) {
+      await settle()
+      press(document.querySelector(`[aria-label="${triggerLabel}"]`)!)
+      await settle()
+      const item = Array.from(
+        document.querySelectorAll('[role="menuitemradio"]')
+      ).find((el) => el.textContent === option)
+      expect(item).toBeDefined()
+      press(item!)
+    }
+
+    beforeEach(() => {
+      // The collapse test above persists `{recent: true}`; left in place the
+      // section renders collapsed, with no rows for a filter to narrow.
+      localStorage.clear()
+    })
+
+    afterEach(() => {
+      // The describes after this one reset only the storage keys they use, so
+      // a filter left behind would quietly narrow Recent in all of them.
+      localStorage.removeItem(FILTER_KEY)
+    })
+
+    it("restores the persisted filter on mount", () => {
+      localStorage.setItem(FILTER_KEY, "chats")
+      render(recentTree(true))
+      // conv-12 (chat) stays in Recent; conv-11 (folder) keeps only its
+      // Folders row.
+      expect(cardsFor(12)).toBe(2)
+      expect(cardsFor(11)).toBe(1)
+    })
+
+    it.each([
+      // Only a folder conversation left, so "chats" empties Recent…
+      { filter: "chats", only: conv(11, 1), hint: noRecentChats },
+      // …and only a chat, so "folders" does.
+      {
+        filter: "folders",
+        only: conv(12, 99, { kind: "chat" }),
+        hint: noRecentFolders,
+      },
+    ])(
+      "names the $filter filter when it narrows Recent to nothing",
+      ({ filter, only, hint }) => {
+        localStorage.setItem(FILTER_KEY, filter)
+        useAppWorkspaceStore.setState({ conversations: [only] })
+        render(recentTree(true))
+        const text = document.body.textContent
+        expect(text).toContain(hint)
+        // Exactly one hint: neither the other filter's nor the unfiltered one.
+        for (const other of [noRecent, noRecentChats, noRecentFolders]) {
+          if (other !== hint) expect(text).not.toContain(other)
+        }
+      }
+    )
+
+    it("applies, persists and undoes a pick from the header menu", async () => {
+      render(recentTree(true))
+      expect(cardsFor(11)).toBe(2)
+      expect(cardsFor(12)).toBe(2)
+
+      await pick("Show in Recent: All", "Folders")
+      expect(localStorage.getItem(FILTER_KEY)).toBe("folders")
+      expect(cardsFor(11)).toBe(2)
+      expect(cardsFor(12)).toBe(1)
+
+      // Back to All from the (now relabelled) trigger: both kinds return.
+      await pick("Show in Recent: Folders", "All")
+      expect(localStorage.getItem(FILTER_KEY)).toBe("all")
+      expect(cardsFor(11)).toBe(2)
+      expect(cardsFor(12)).toBe(2)
+    })
+  })
 })
 
 describe("SidebarConversationList — expand / collapse all", () => {
@@ -1582,5 +1718,349 @@ describe("SidebarConversationList — folder groups", () => {
     expect(title.className).toContain("text-sidebar-foreground/75")
     expect(title.className).not.toContain("folder-title-tint")
     expect(title.getAttribute("style")).toBeNull()
+  })
+
+  // A group heading carries the Folders heading's Clone Repository / Open
+  // Folder pair, and whatever folder they open is filed into that group.
+  describe("adding a folder from a group heading", () => {
+    const GROUP_EXPANDED_KEY = "workspace:sidebar-folder-group-expanded"
+    const setFolderGroup = vi.fn<
+      (folderId: number, groupId: number | null) => Promise<void>
+    >(() => Promise.resolve())
+
+    // Collapsing persists, and nothing else clears this key between tests.
+    afterEach(() => {
+      localStorage.removeItem(GROUP_EXPANDED_KEY)
+    })
+
+    beforeEach(() => {
+      setFolderGroup.mockClear()
+      folderDialogs.clone = null
+      folderDialogs.browser = null
+      localStorage.removeItem(GROUP_EXPANDED_KEY)
+      const folders = [
+        { ...folder(5, "Member"), sort_order: 1, group_id: 7 },
+        { ...folder(9, "Loose"), sort_order: 2, group_id: null },
+      ] as FolderDetail[]
+      useAppWorkspaceStore.setState({
+        folders,
+        allFolders: folders,
+        folderGroups: [group(7, "Work", 1)],
+        conversations: [],
+        setFolderGroup,
+      })
+    })
+
+    /** The heading row of group 7 — the toggle and its trailing actions. */
+    function groupRow() {
+      const toggle = document.querySelector('[data-folder-group-id="7"]')
+      if (!toggle?.parentElement) throw new Error("group 7 heading not found")
+      return within(toggle.parentElement)
+    }
+
+    /** The Folders section heading's action with this label — the one copy of
+     *  it that is NOT inside a group heading. */
+    function headingAction(label: string): HTMLElement {
+      const groupHeading = document.querySelector('[data-folder-group-id="7"]')
+        ?.parentElement as HTMLElement | null | undefined
+      const match = Array.from(
+        document.querySelectorAll<HTMLElement>(`[aria-label="${label}"]`)
+      ).find((el) => !groupHeading?.contains(el))
+      if (!match) throw new Error(`Folders heading action ${label} not found`)
+      return match
+    }
+
+    /** A folder as `openFolder` resolves it: brand new, so at the top level. */
+    function opened(id: number, overrides: Partial<FolderDetail> = {}) {
+      return {
+        ...folder(id, `Opened ${id}`),
+        sort_order: 3,
+        group_id: null,
+        ...overrides,
+      } as FolderDetail
+    }
+
+    async function report(
+      dialog: FolderDialogProbe | null,
+      detail: FolderDetail
+    ) {
+      await act(async () => {
+        dialog?.onFolderOpened?.(detail)
+        // The placement awaits the (stubbed) move before it opens the group.
+        await Promise.resolve()
+      })
+    }
+
+    it("files a folder opened from the group's Open Folder into the group", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+      expect(folderDialogs.browser?.open).toBe(true)
+
+      await report(folderDialogs.browser, opened(42))
+
+      expect(setFolderGroup).toHaveBeenCalledTimes(1)
+      expect(setFolderGroup).toHaveBeenCalledWith(42, 7)
+    })
+
+    it("files a repository cloned from the group into the group", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Clone Repository"))
+      })
+      expect(folderDialogs.clone?.open).toBe(true)
+
+      await report(folderDialogs.clone, opened(42))
+
+      expect(setFolderGroup).toHaveBeenCalledTimes(1)
+      expect(setFolderGroup).toHaveBeenCalledWith(42, 7)
+    })
+
+    it("leaves folders added from the Folders heading at the top level", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(headingAction("Open Folder"))
+      })
+      expect(folderDialogs.browser?.open).toBe(true)
+      await report(folderDialogs.browser, opened(42))
+
+      act(() => {
+        fireEvent.click(headingAction("Clone Repository"))
+      })
+      expect(folderDialogs.clone?.open).toBe(true)
+      await report(folderDialogs.clone, opened(43))
+
+      expect(setFolderGroup).not.toHaveBeenCalled()
+    })
+
+    it("files a clone into the group it started from, even if the dialog is reopened elsewhere", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Clone Repository"))
+      })
+      // What a slow clone keeps hold of: the callback of the render its Clone
+      // click happened in (see the CloneDialog test pinning that side).
+      const startedFromGroup = folderDialogs.clone?.onFolderOpened
+      act(() => {
+        fireEvent.click(headingAction("Clone Repository"))
+      })
+      expect(folderDialogs.clone?.onFolderOpened).not.toBe(startedFromGroup)
+
+      await act(async () => {
+        startedFromGroup?.(opened(42))
+        await Promise.resolve()
+      })
+
+      expect(setFolderGroup).toHaveBeenCalledTimes(1)
+      expect(setFolderGroup).toHaveBeenCalledWith(42, 7)
+    })
+
+    it("files every root one open-folder session opens", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+
+      // The dialog's "Change" step goes back and opens another root; both
+      // were opened from this group.
+      await report(folderDialogs.browser, opened(42))
+      await report(folderDialogs.browser, opened(43))
+
+      expect(setFolderGroup.mock.calls).toEqual([
+        [42, 7],
+        [43, 7],
+      ])
+    })
+
+    it("does not carry a group into a later opening from the Folders heading", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+      // The dialog is closed without opening anything, then reopened from the
+      // section heading: that opening names no group, so none may stick.
+      act(() => {
+        fireEvent.click(headingAction("Open Folder"))
+      })
+
+      await report(folderDialogs.browser, opened(42))
+
+      expect(setFolderGroup).not.toHaveBeenCalled()
+    })
+
+    it("opens a collapsed group to show the folder that landed in it", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(document.querySelector('[data-folder-group-id="7"]')!)
+      })
+      expect(document.querySelector('[data-folder-id="5"]')).toBeNull()
+
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+      await report(folderDialogs.browser, opened(42))
+
+      expect(setFolderGroup).toHaveBeenCalledWith(42, 7)
+      expect(document.querySelector('[data-folder-id="5"]')).not.toBeNull()
+      expect(
+        JSON.parse(localStorage.getItem(GROUP_EXPANDED_KEY) ?? "{}")
+      ).toEqual({ 7: true })
+    })
+
+    it("leaves a folder that is already in the group where it is", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+
+      // Re-moving a member would only shuffle it to the end of the group.
+      await report(folderDialogs.browser, opened(5, { group_id: 7 }))
+
+      expect(setFolderGroup).not.toHaveBeenCalled()
+    })
+
+    it("leaves a worktree of an open repo with its repo", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+
+      // Folder 9 is open, so this worktree renders under it wherever it sits
+      // and has no row of its own to file.
+      await report(folderDialogs.browser, opened(43, { parent_id: 9 }))
+
+      expect(setFolderGroup).not.toHaveBeenCalled()
+    })
+
+    it("keeps the folder at the top level when the group is gone by the time it opens", async () => {
+      render(tree())
+      act(() => {
+        fireEvent.click(groupRow().getByLabelText("Open Folder"))
+      })
+      // Deleted from another window while the dialog was open.
+      act(() => {
+        useAppWorkspaceStore.setState({ folderGroups: [] })
+      })
+
+      await report(folderDialogs.browser, opened(42))
+
+      expect(setFolderGroup).not.toHaveBeenCalled()
+    })
+
+    it("says so when the folder cannot be filed, and leaves the group shut", async () => {
+      const toastError = vi.spyOn(toast, "error").mockImplementation(() => 0)
+      setFolderGroup.mockImplementationOnce(() =>
+        Promise.reject(new Error("boom"))
+      )
+      try {
+        render(tree())
+        act(() => {
+          fireEvent.click(document.querySelector('[data-folder-group-id="7"]')!)
+        })
+        act(() => {
+          fireEvent.click(groupRow().getByLabelText("Open Folder"))
+        })
+
+        await report(folderDialogs.browser, opened(42))
+
+        expect(toastError).toHaveBeenCalledWith("Failed to move folder: boom")
+        // Nothing landed, so there is nothing to open the group for.
+        expect(document.querySelector('[data-folder-id="5"]')).toBeNull()
+      } finally {
+        toastError.mockRestore()
+      }
+    })
+  })
+})
+
+describe("SidebarConversationList — tag filter", () => {
+  // Rendered with its own filter prop; the provider stays mounted so `t` is
+  // stable, exactly like `tree()`.
+  const filterHarness: { set: (f: TagFilter) => void } = { set: () => {} }
+  function FilteredHarness({ initial }: { initial: TagFilter }) {
+    const [filter, setFilter] = useState(initial)
+    useEffect(() => {
+      filterHarness.set = setFilter
+    }, [])
+    return (
+      <SidebarConversationList
+        showCompleted
+        sortMode="created"
+        tagFilter={filter}
+      />
+    )
+  }
+  const filtered = (initial: TagFilter) => (
+    <NextIntlClientProvider locale="en" messages={enMessages}>
+      <FilteredHarness initial={initial} />
+    </NextIntlClientProvider>
+  )
+
+  beforeEach(() => {
+    probes.card = 0
+    probes.folder = 0
+    store.activeTabId = null
+    store.tabSpec = []
+    const folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [
+        conv(11, 1, { tag_ids: [5] }),
+        conv(12, 1),
+        conv(21, 2, { tag_ids: [6] }),
+        conv(31, 9, { kind: "chat" }),
+      ],
+    })
+  })
+
+  const shownIds = (container: HTMLElement) =>
+    [...container.querySelectorAll("[data-conversation-id]")].map((el) =>
+      Number(el.getAttribute("data-conversation-id"))
+    )
+
+  it("shows only matching conversations and drops folders with no match", () => {
+    const { container, getByText } = render(
+      filtered({ tagIds: [5], mode: "any" })
+    )
+    expect(shownIds(container)).toEqual([11])
+    expect(container.querySelector('[data-folder-id="1"]')).not.toBeNull()
+    expect(container.querySelector('[data-folder-id="2"]')).toBeNull()
+    // The Chat section is still there, saying why it is empty.
+    expect(getByText("No conversations with these tags")).toBeTruthy()
+  })
+
+  it("matches all selected tags in all mode", () => {
+    useAppWorkspaceStore.setState({
+      conversations: [
+        conv(11, 1, { tag_ids: [5, 6] }),
+        conv(12, 1, { tag_ids: [5] }),
+      ],
+    })
+    const { container } = render(filtered({ tagIds: [5, 6], mode: "all" }))
+    expect(shownIds(container)).toEqual([11])
+  })
+
+  it("puts every folder back once the filter is cleared", () => {
+    const { container } = render(filtered({ tagIds: [5], mode: "any" }))
+    act(() => filterHarness.set({ tagIds: [], mode: "any" }))
+    expect(shownIds(container).sort()).toEqual([11, 12, 21, 31])
+    expect(container.querySelector('[data-folder-id="2"]')).not.toBeNull()
+  })
+
+  it("still re-renders only the changed card under an active filter", () => {
+    render(filtered({ tagIds: [5, 6], mode: "any" }))
+    const prev = useAppWorkspaceStore.getState().conversations
+    const next = prev.slice()
+    const idx = next.findIndex((c) => c.id === 21)
+    next[idx] = { ...next[idx], status: "completed" }
+    probes.card = 0
+    probes.folder = 0
+    act(() => {
+      useAppWorkspaceStore.setState({ conversations: next })
+    })
+    expect(probes.card).toBe(1)
+    expect(probes.folder).toBe(0)
   })
 })

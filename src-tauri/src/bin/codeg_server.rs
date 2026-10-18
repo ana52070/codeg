@@ -83,6 +83,24 @@ fn main() -> ExitCode {
         .unwrap_or_else(|_| default_data_dir());
     let resolved_data_dir = codeg_lib::git_credential::absolutize(&resolved_data_dir);
     std::env::set_var("CODEG_DATA_DIR", &resolved_data_dir);
+    // This process's `codeg-cli` discovery file, for everything it starts: a
+    // CLI run from one of its terminals or agents connects back to THIS
+    // runtime, not to whichever else shares the data directory. Overrides a
+    // value inherited from a runtime this one was started from.
+    std::env::set_var(
+        codeg_lib::cli_run::discovery::ENDPOINT_FILE_ENV,
+        codeg_lib::cli_run::discovery::file_for(&resolved_data_dir, std::process::id()),
+    );
+
+    // The codeg-cli installed beside this server, for everything it starts
+    // (`cli_run::shim`): the matching one, whatever else is on their PATH.
+    if let Some(cli) = codeg_lib::update::runtime::self_exe()
+        .parent()
+        .map(|dir| dir.join(if cfg!(windows) { "codeg-cli.exe" } else { "codeg-cli" }))
+        .filter(|p| p.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))
+    {
+        std::env::set_var(codeg_lib::cli_run::shim::CLI_ENV, cli);
+    }
 
     // Install the logging subscriber now that CODEG_DATA_DIR is pinned (the logs
     // dir resolves from it). Doing it here — before the first server diagnostic
@@ -120,6 +138,65 @@ fn main() -> ExitCode {
         // Return (don't process::exit) so `_log_guard` drops on the way out and
         // flushes the non-blocking file appender before the process ends.
         return ExitCode::from(2);
+    }
+
+    // Before anything opens the database (see `runtime_lock`): every server
+    // shares the data directory, and waits while a `codeg-cli --standalone`
+    // server has it — which itself takes it alone, or leaves untouched.
+    let exclusive = std::env::var(codeg_lib::runtime_lock::EXCLUSIVE_ENV).is_ok_and(|v| v == "1");
+    let _runtime_lock = match codeg_lib::runtime_lock::hold_for_server(&resolved_data_dir) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            tracing::error!(
+                "[SERVER] {} is in use by another codeg; a --standalone server needs it alone",
+                resolved_data_dir.display()
+            );
+            return ExitCode::from(codeg_lib::runtime_lock::BUSY_EXIT_CODE);
+        }
+        Err(e) if exclusive => {
+            tracing::error!(
+                "[SERVER][FATAL] cannot take {} alone: {e}",
+                resolved_data_dir.display()
+            );
+            return ExitCode::from(1);
+        }
+        Err(e) if codeg_lib::runtime_lock::locking_unsupported(&e) => {
+            tracing::warn!(
+                "[SERVER][WARN] {} cannot lock files ({e}); going on without, so a \
+                 `codeg-cli --standalone` there would not see this server",
+                resolved_data_dir.display()
+            );
+            None
+        }
+        Err(e) => {
+            // Not run unlocked: a private server could be using the database.
+            tracing::error!(
+                "[SERVER][FATAL] cannot lock {} for this runtime: {e}",
+                resolved_data_dir.display()
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    // A `codeg-cli --standalone` server ends with the codeg-cli that started
+    // it: its stdin closes when that process is gone, a crash included.
+    if std::env::var(codeg_lib::runtime_lock::EXIT_ON_STDIN_EOF_ENV).is_ok_and(|v| v == "1") {
+        let endpoint =
+            codeg_lib::cli_run::discovery::file_for(&resolved_data_dir, std::process::id());
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut stdin = std::io::stdin();
+            let mut sink = [0u8; 256];
+            while matches!(stdin.read(&mut sink), Ok(n) if n > 0) {}
+            // No CLI may find this process once it is gone, and its broker
+            // socket goes with it: `exit` runs no destructor to remove either.
+            let _ = std::fs::remove_file(&endpoint);
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(
+                codeg_lib::acp::delegation::listener::default_socket_path(&std::env::temp_dir()),
+            );
+            std::process::exit(0);
+        });
     }
 
     // `main` returns the worker's exit code so `_log_guard` drops here — after
@@ -259,6 +336,15 @@ async fn async_main() -> ExitCode {
     // Build AppState
     let pet_state_handle = codeg_lib::pet_state_mapper::new_pet_state_handle();
     let connection_manager = codeg_lib::app_state::default_connection_manager();
+    let cli_runs = codeg_lib::cli_run::CliRunService::new(
+        &db,
+        &connection_manager,
+        emitter.clone(),
+        acp_event_bus.clone(),
+        data_dir.clone(),
+        codeg_lib::cli_run::wire::RuntimeKind::Server,
+    );
+    let cli_access = codeg_lib::cli_run::CliAccess::new(cli_runs.clone(), data_dir.clone());
     let (
         delegation_broker,
         delegation_tokens,
@@ -268,6 +354,7 @@ async fn async_main() -> ExitCode {
         session_info_config,
         chat_authoring_config,
         browser_tools_config,
+        computer_tools_config,
     ) = codeg_lib::app_state::build_delegation_stack(
         &connection_manager,
         db.conn.clone(),
@@ -295,9 +382,13 @@ async fn async_main() -> ExitCode {
         session_info_config: session_info_config.clone(),
         chat_authoring_config: chat_authoring_config.clone(),
         browser_tools_config: browser_tools_config.clone(),
+        computer_tools_config: computer_tools_config.clone(),
+        computer_service: std::sync::OnceLock::new(),
         system_op_lock: codeg_lib::app_state::default_system_op_lock(),
         update_state: codeg_lib::app_state::default_update_state(),
         quota_manager: codeg_lib::app_state::default_quota_manager(),
+        cli_runs,
+        cli_access,
     });
     state
         .connection_manager
@@ -350,6 +441,54 @@ async fn async_main() -> ExitCode {
         &state.browser_tools_config,
     )
     .await;
+    // And the computer-use switches: the popover reports them, and — where
+    // the person running this server lets it share the screen it runs on —
+    // the computer service below starts from them.
+    codeg_lib::commands::computer_tools::apply_persisted_computer_tools_config(
+        &state.db.conn,
+        &state.computer_tools_config,
+    )
+    .await;
+    // The generative-UI skill's central copy, and the move from 0.35.0's
+    // `json-render`: before the server takes a request, so the move can never
+    // undo a change made on the settings page.
+    codeg_lib::commands::generative_ui::install_generative_ui_skill(&state.db.conn).await;
+    // Computer use: only where whoever runs this server says so, by
+    // CODEG_COMPUTER_USE — the server's web clients then share this
+    // machine's windows with agents, and Stop them, from the panel. Nothing
+    // else here can: a web client holds the token, not the machine.
+    if computer_use_requested() {
+        let service = codeg_lib::commands::computer::ComputerService::start(
+            codeg_lib::commands::computer::ComputerHost::Server {
+                broadcaster: state.event_broadcaster.clone(),
+                emitter: state.emitter.clone(),
+            },
+            state.computer_tools_config.clone(),
+        );
+        let _ = state.computer_service.set(service);
+        eprintln!(
+            "[SERVER] Computer use is offered (CODEG_COMPUTER_USE): this server's web clients \
+             may share this machine's windows with agents."
+        );
+        if !has_desktop_session() {
+            tracing::warn!(
+                "[SERVER] CODEG_COMPUTER_USE is set, but this process does not look like it \
+                 runs in a desktop session; computer use will report what stops it"
+            );
+        }
+    }
+    // A server an earlier install.ps1 put in %LOCALAPPDATA%\codeg shares that
+    // folder with the desktop app once it is installed there too: each
+    // install replaces the other's codeg-mcp.exe, codeg-computer-helper.exe
+    // and web\. install.ps1 moves the server out.
+    #[cfg(windows)]
+    if std::env::current_exe().is_ok_and(|exe| beside_the_desktop_app(&exe)) {
+        eprintln!(
+            "[SERVER] This codeg-server is in the codeg desktop app's folder, where each \
+             replaces the other's codeg-mcp.exe, codeg-computer-helper.exe and web\\. Re-run \
+             install.ps1 to move it to %LOCALAPPDATA%\\codeg-server."
+        );
+    }
     // Before accepting connections: keep ACP model terminal fallbacks aligned
     // with the same default-shell preference the built-in terminal uses, and
     // seed the command-color opt-in that every launch env is built from.
@@ -393,6 +532,18 @@ async fn async_main() -> ExitCode {
             // "browser tab" is an iframe their own browser renders, which
             // nothing here can reach.
             Arc::new(codeg_lib::acp::browser_tools::NoBrowserTabs),
+            // The screen this server runs on, where it is let share it
+            // (`CODEG_COMPUTER_USE`); none otherwise.
+            match state.computer_service.get() {
+                Some(service) => Arc::new(codeg_lib::commands::computer::McpComputerTools::new(
+                    service.clone(),
+                ))
+                    as Arc<dyn codeg_lib::acp::computer_tools::ComputerToolAccess>,
+                None => Arc::new(codeg_lib::acp::computer_tools::NoComputerDesktop),
+            },
+            Arc::new(codeg_lib::acp::result_tool::ConnectionManagerResultLookup {
+                manager: Arc::new(state.connection_manager.clone_ref()),
+            }),
         );
         // Bind through the service handle rather than a bare `listener.run`
         // spawn: it keeps the bind error and the accept-loop handle around, so
@@ -527,6 +678,11 @@ async fn async_main() -> ExitCode {
         tokio::spawn(codeg_lib::automation::run_automation_engine(engine));
     }
 
+    // Headless `codeg-cli` runs (mirrors lib.rs setup): the policy backstop
+    // here; the loopback listener and its discovery file once the server has
+    // its own socket (below), so a server that fails to start publishes none.
+    state.cli_runs.spawn_background();
+
     // Work-task engine (mirrors lib.rs setup): manual pipeline, event-bus
     // settlement, merging git-truth recovery. One per process.
     if let Some(engine) = codeg_lib::work_task::build_task_engine(
@@ -539,6 +695,16 @@ async fn async_main() -> ExitCode {
         state.data_dir.clone(),
     ) {
         tokio::spawn(codeg_lib::work_task::run_task_engine(engine));
+        // Repository-panel auto-processing (mirrors lib.rs setup): only where
+        // the task engine runs, since it mints tasks unattended.
+        if let Some(processor) = codeg_lib::forge::auto::build(
+            codeg_lib::db::AppDatabase {
+                conn: state.db.conn.clone(),
+            },
+            state.emitter.clone(),
+        ) {
+            tokio::spawn(codeg_lib::forge::auto::run(processor));
+        }
     }
 
     // Config-sync uploader (mirrors lib.rs setup): sleeps a minute, then
@@ -607,6 +773,10 @@ async fn async_main() -> ExitCode {
         );
     }
 
+    // Command-line access, unless the setting is off. Every return after this
+    // point stops it again (the serve error path and the end of `main`).
+    state.cli_access.start_if_enabled(&state.db.conn).await;
+
     let local_addr = listener.local_addr().ok();
     let actual_port = local_addr.map(|a| a.port()).unwrap_or(port);
     // `CODEG_HOST` may be `localhost` or a bracketed IPv6 (`[::1]`); advertise
@@ -650,16 +820,85 @@ async fn async_main() -> ExitCode {
     // Start serving
     if let Err(e) = axum::serve(listener, router).await {
         tracing::error!("[SERVER] Server error: {}", e);
+        state.cli_access.stop().await;
         return ExitCode::from(1);
     }
+    // No CLI may find this process once it is gone.
+    state.cli_access.stop().await;
     // Graceful shutdown: release any live office watch preview servers
     // (kill_on_drop is the backstop, but this frees their ports promptly).
     codeg_lib::office_watch::stop_all_office_watches();
     ExitCode::SUCCESS
 }
 
+/// Whether whoever runs this server lets it share the screen it runs on with
+/// agents: `CODEG_COMPUTER_USE` set to 1, true, yes or on.
+fn computer_use_requested() -> bool {
+    computer_use_requested_by(std::env::var("CODEG_COMPUTER_USE").ok().as_deref())
+}
+
+/// [`computer_use_requested`], for the variable's value.
+fn computer_use_requested_by(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Whether this process looks like it runs where there is a screen: on
+/// Linux, a display it can reach; elsewhere it is not told apart here (the
+/// helper finds out, and says).
+fn has_desktop_session() -> bool {
+    if cfg!(target_os = "linux") {
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    } else {
+        true
+    }
+}
+
+/// Whether `exe` sits beside the desktop app's `codeg.exe`.
+#[cfg(any(windows, test))]
+fn beside_the_desktop_app(exe: &std::path::Path) -> bool {
+    exe.parent()
+        .is_some_and(|dir| dir.join("codeg.exe").is_file())
+}
+
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .map(|d| d.join("codeg"))
         .unwrap_or_else(|| PathBuf::from(".codeg-data"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the desktop app's own executable beside the server counts.
+    #[test]
+    fn a_server_beside_the_desktop_app_is_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("codeg-server.exe");
+        std::fs::write(&exe, b"").unwrap();
+        assert!(!beside_the_desktop_app(&exe));
+        std::fs::write(dir.path().join("codeg-mcp.exe"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("codeg")).unwrap();
+        assert!(!beside_the_desktop_app(&exe));
+        std::fs::write(dir.path().join("codeg.exe"), b"").unwrap();
+        assert!(beside_the_desktop_app(&exe));
+    }
+
+    /// Computer use is offered only when the variable says so in words —
+    /// anything else, unset included, is no.
+    #[test]
+    fn computer_use_is_offered_only_when_asked_for() {
+        for yes in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(computer_use_requested_by(Some(yes)), "{yes}");
+        }
+        for no in ["", "0", "false", "off", "no", "2", "enabled"] {
+            assert!(!computer_use_requested_by(Some(no)), "{no}");
+        }
+        assert!(!computer_use_requested_by(None));
+    }
 }

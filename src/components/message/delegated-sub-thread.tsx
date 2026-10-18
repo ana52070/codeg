@@ -10,8 +10,10 @@
  * render the child's output inline and does not expand. The child's result is
  * delivered to the LLM via `get_delegation_status` and to the user by opening
  * the child session ("查看会话" → SubAgentSessionDialog, which also hosts the
- * child's permission prompts). When the child is awaiting a permission decision
- * the status badge reflects it, cueing the user to open the session.
+ * child's blocking prompts). When the child is awaiting a decision the status
+ * badge reflects it, cueing the user to open the session — or to answer it in
+ * the `get_delegation_status` row that is waiting on the task, which carries
+ * the same prompt.
  *
  * All agent-type / task / status / child-id resolution lives in
  * `useDelegationCardModel` (shared with the top-right `SubAgentOverlay`), so the
@@ -71,7 +73,7 @@ export function DelegatedSubThread({
     meta,
   }
   const {
-    agentType,
+    identity,
     task,
     taskId,
     status,
@@ -94,7 +96,7 @@ export function DelegatedSubThread({
       className="@container/delegcard rounded-lg border border-border bg-card ws-msg-card"
     >
       <DelegationCardRow
-        agentType={agentType}
+        identity={identity}
         taskId={taskId}
         status={status}
         errorCode={errorCode}
@@ -114,7 +116,7 @@ export function DelegatedSubThread({
           onOpenChange={setDialogOpen}
           childConversationId={childConversationId}
           childConnectionId={childConnectionId}
-          agentType={agentType}
+          identity={identity}
           kickoffTask={task}
         />
       )}

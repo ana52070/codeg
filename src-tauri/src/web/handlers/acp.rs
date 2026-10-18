@@ -201,9 +201,10 @@ pub struct AcpPreflightParams {
 }
 
 pub async fn acp_preflight(
+    Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpPreflightParams>,
 ) -> Result<Json<PreflightResult>, AppCommandError> {
-    let result = acp_commands::acp_preflight(params.agent_type, params.force_refresh)
+    let result = acp_commands::acp_preflight_core(&state.db, params.agent_type, params.force_refresh)
         .await
         .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
     Ok(Json(result))
@@ -420,6 +421,10 @@ pub struct AcpDescribeAgentOptionsParams {
     pub agent_type: crate::models::AgentType,
     #[serde(default)]
     pub working_dir: Option<String>,
+    /// Config selections to apply on the probe session before reading the
+    /// snapshot — callers pass the model so per-model option lists match.
+    #[serde(default)]
+    pub config_values: Option<std::collections::BTreeMap<String, String>>,
 }
 
 pub async fn acp_describe_agent_options(
@@ -432,6 +437,7 @@ pub async fn acp_describe_agent_options(
         &state.data_dir,
         params.agent_type,
         params.working_dir,
+        params.config_values.unwrap_or_default(),
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
@@ -941,8 +947,20 @@ pub async fn acp_update_pi_config(
 }
 
 pub async fn acp_load_pi_config(
+    Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<acp_commands::PiConfigProjection>, AppCommandError> {
-    Ok(Json(acp_commands::load_pi_config_core()))
+    let config = acp_commands::load_pi_config_for_db(&state.db)
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+    Ok(Json(config))
+}
+
+pub async fn acp_list_pi_model_capabilities(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<acp_commands::PiModelCatalog>, AppCommandError> {
+    Ok(Json(
+        acp_commands::list_pi_model_catalog_core(&state.db, &state.data_dir).await,
+    ))
 }
 
 pub async fn acp_load_deepseek_model_catalog(
@@ -1137,6 +1155,29 @@ pub async fn acp_download_agent_binary(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AcpUpdateSystemAgentParams {
+    pub agent_type: AgentType,
+    pub task_id: String,
+}
+
+pub async fn acp_update_system_agent(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<AcpUpdateSystemAgentParams>,
+) -> Result<Json<Option<String>>, AppCommandError> {
+    let emitter = state.emitter.clone();
+    let version = acp_commands::acp_update_system_agent_core(
+        params.agent_type,
+        params.task_id,
+        &state.db,
+        &emitter,
+    )
+    .await
+    .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+    Ok(Json(version))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AcpInstallUvToolParams {
     pub task_id: String,
 }
@@ -1162,6 +1203,15 @@ pub async fn acp_detect_agent_local_version(
         acp_commands::acp_detect_agent_local_version_core(params.agent_type, &db.conn, &emitter)
             .await
             .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
+    Ok(Json(result))
+}
+
+pub async fn acp_fetch_agent_latest_release(
+    Json(params): Json<AgentTypeParams>,
+) -> Result<Json<Option<crate::acp::latest_release::AgentLatestRelease>>, AppCommandError> {
+    let result = acp_commands::acp_fetch_agent_latest_release_core(params.agent_type)
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
     Ok(Json(result))
 }
 

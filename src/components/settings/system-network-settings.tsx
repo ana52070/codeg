@@ -20,6 +20,7 @@ import {
 import { useLocale, useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { useAppI18n } from "@/components/i18n-provider"
+import { CliAccessSettings } from "@/components/settings/cli-access-settings"
 import { DataSyncSettings } from "@/components/settings/data-sync-settings"
 import { ReleaseNotes } from "@/components/settings/release-notes"
 import { SettingsSection } from "@/components/shared/settings-section"
@@ -455,7 +456,7 @@ export function SystemNetworkSettings() {
             <Button
               variant="ghost"
               className="size-5 rounded-full"
-              onClick={() => openUrl("https://github.com/xintaofei/codeg")}
+              onClick={() => openUrl("https://github.com/spacering-net/codeg")}
             >
               <GithubMarkIcon className="size-5" />
             </Button>
@@ -535,7 +536,7 @@ export function SystemNetworkSettings() {
                     size="sm"
                     onClick={() =>
                       openUrl(
-                        "https://github.com/xintaofei/codeg/releases/latest"
+                        "https://github.com/spacering-net/codeg/releases/latest"
                       )
                     }
                   >
@@ -706,6 +707,8 @@ export function SystemNetworkSettings() {
             )}
           </SettingsSection>
         )}
+
+        <CliAccessSettings />
 
         <section className="rounded-xl border bg-card p-4 space-y-4">
           <div className="flex items-center gap-2">

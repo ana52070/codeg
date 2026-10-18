@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from "vitest"
 import { WebTransport } from "./web-transport"
 
 // Minimal controllable WebSocket stand-in: records instances and lets the test
@@ -49,7 +57,7 @@ function lastWs(): MockWebSocket {
   return MockWebSocket.instances[MockWebSocket.instances.length - 1]
 }
 
-let fetchMock: ReturnType<typeof vi.fn>
+let fetchMock: Mock
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -85,7 +93,9 @@ describe("WebTransport connection state machine", () => {
   it("starts connected and the first __ready__ does not fire reconnect callbacks", () => {
     const t = new WebTransport("http://localhost")
     const onReconnect = vi.fn()
+    const onReady = vi.fn()
     t.onReconnect(onReconnect)
+    t.onReady(onReady)
     expect(t.getConnectionSnapshot()).toBe("connected")
 
     t.eventStream()
@@ -96,6 +106,7 @@ describe("WebTransport connection state machine", () => {
     expect(t.getConnectionSnapshot()).toBe("connected")
     // First ready = initial connect, not a reconnect.
     expect(onReconnect).not.toHaveBeenCalled()
+    expect(onReady).toHaveBeenCalledTimes(1)
   })
 
   it("treats a dropped socket as reconnecting — never logs out or wipes the token", () => {
@@ -113,7 +124,9 @@ describe("WebTransport connection state machine", () => {
   it("probes /api/health on backoff and reconnects on 200; the 2nd ready fires reconnect callbacks", async () => {
     const { t, ws } = connectReady()
     const onReconnect = vi.fn()
+    const onReady = vi.fn()
     t.onReconnect(onReconnect)
+    t.onReady(onReady)
     fetchMock.mockResolvedValue(ok200())
 
     ws.drop()
@@ -131,6 +144,7 @@ describe("WebTransport connection state machine", () => {
     expect(t.getConnectionSnapshot()).toBe("connected")
     // Reconnect (2nd ready) refreshes consumer state exactly once.
     expect(onReconnect).toHaveBeenCalledTimes(1)
+    expect(onReady).toHaveBeenCalledTimes(1)
   })
 
   it("enters unauthorized on a 401 probe and stops retrying (token left intact)", async () => {

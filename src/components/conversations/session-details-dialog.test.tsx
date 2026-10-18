@@ -104,7 +104,41 @@ describe("SessionDetailsDialog", () => {
     expect(getByText("50K / 200K (25.0%)")).toBeTruthy()
     // The message count field was intentionally removed.
     expect(queryByText("Messages")).toBeNull()
+    // The aux-panel tab leaves these two sections out; the dialog keeps them.
+    expect(getByText("Token Usage")).toBeTruthy()
+    expect(getByText("Timestamps")).toBeTruthy()
     expect(mockGet).not.toHaveBeenCalled()
+  })
+
+  it("names the assistant a delegation sub-session ran as", () => {
+    const { getByText, queryByText, rerender } = renderWithIntl(
+      <SessionDetailsDialog
+        open
+        onOpenChange={() => {}}
+        summary={summary({
+          parent_id: 3,
+          assistant_id: 5,
+          assistant_name: "Reviewer",
+        })}
+        stats={fullStats}
+      />
+    )
+    expect(getByText("Assistant")).toBeTruthy()
+    // Not in the store here: the name it carried.
+    expect(getByText("Reviewer")).toBeTruthy()
+
+    // A plain session has no such row.
+    rerender(
+      wrap(
+        <SessionDetailsDialog
+          open
+          onOpenChange={() => {}}
+          summary={summary()}
+          stats={fullStats}
+        />
+      )
+    )
+    expect(queryByText("Assistant")).toBeNull()
   })
 
   it("falls back to completed summary timestamps when stats duration is missing", () => {

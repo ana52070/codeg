@@ -4,14 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { isImeCompositionKey } from "@/lib/ime-composition"
 import { Button } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import {
   BookOpenText,
   Check,
   ChevronUp,
   ClipboardPaste,
   Clock,
-  Cog,
   Copy,
   MessageSquareText,
   Scissors,
@@ -28,11 +26,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover"
-import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -42,7 +35,6 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
-import { AgentIcon } from "@/components/agent-icon"
 import { cn, copyTextFromMenu } from "@/lib/utils"
 import { useShortcutSettings } from "@/hooks/use-shortcut-settings"
 import { imageFilesFromClipboardApi } from "@/lib/clipboard-images"
@@ -84,27 +76,13 @@ import {
 import { ComposerQuotaBadge } from "@/components/chat/composer-quota-badge"
 import { ComposerContextUsage } from "@/components/chat/composer-context-usage"
 import { ComposerConnectionStatus } from "@/components/chat/composer-connection-status"
-import { InlineModeSelector } from "@/components/chat/mode-selector"
+import { SessionSettingsPicker } from "@/components/chat/session-settings-picker"
 import {
-  InlineSessionConfigSelector,
-  InlineSessionConfigToggle,
-} from "@/components/chat/session-config-selector"
-import { ModelOptionPicker } from "@/components/chat/model-option-picker"
-import { SelectorTooltip } from "@/components/chat/selector-tooltip"
-import {
-  SessionSelectorsPanel,
-  type SessionSelectorGroup,
-  type SessionSelectorSetting,
-} from "@/components/chat/session-selectors-panel"
-import {
-  deriveModelGroups,
-  isModelConfigOption,
-  modelListGroups,
-  MODEL_LIST_VIRTUALIZE_THRESHOLD,
-  type ModelOptionGroup,
-} from "@/lib/model-config-groups"
+  buildSessionSettings,
+  type SessionSettingTarget,
+} from "@/lib/session-settings"
 import { useAgentSkills } from "@/hooks/use-agent-skills"
-import { useScrollbarSafeDismiss } from "@/hooks/use-scrollbar-safe-dismiss"
+import { isPrimaryPointerCoarse } from "@/hooks/use-is-coarse-pointer"
 import { useAgentVocabulary } from "@/hooks/use-agent-vocabulary"
 import {
   clearMessageInputDraftV2,
@@ -136,10 +114,12 @@ import {
 } from "@/components/chat/composer/composer-sizing"
 import {
   buildKnownInvocations,
-  commandInvocationToken,
   commandToReference,
+  diskSkillTrigger,
+  skillsForMenu,
   skillToReference,
 } from "@/components/chat/composer/invocation-reference"
+import { CommandOptionLabel } from "@/components/chat/composer/command-option-label"
 import { cutSelectionToClipboard } from "@/components/chat/composer/clipboard-actions"
 import {
   ComposerTokenAction,
@@ -198,6 +178,13 @@ interface MessageInputProps {
   onConfigOptionChange?: (configId: string, valueId: string) => void
   agentType?: AgentType | null
   availableCommands?: AvailableCommandInfo[] | null
+  /**
+   * The prompt the agent predicts the user will send next (claude-agent-acp
+   * 0.92.0). Between turns the empty composer shows it as its placeholder and
+   * a bare Tab fills it in, sending nothing. Not offered while a turn runs,
+   * while the composer is disabled, or while a queued message is being edited.
+   */
+  promptSuggestion?: string | null
   /**
    * The agent's command list is still on its way (the connection is being
    * established). The editor stays typable throughout, so `/` opens its panel
@@ -323,45 +310,6 @@ function SelectorLoadingChip({ label }: { label: string }) {
   )
 }
 
-/**
- * Stand-in for the model / mode / config chips while the session is still being
- * established. It holds the row open at the real chips' height (`h-6`, matching
- * `Button size="xs"`) so nothing jumps when they arrive, and — unlike the
- * loading row inside the collapsed cog popover, which only a user who opens the
- * popover ever sees — it is visible where the chips themselves will be. Opening
- * a historical conversation spends seconds in exactly this state, and showing
- * nothing there made a live, still-connecting composer look like a dead one.
- */
-function SelectorLoadingPlaceholder({ label }: { label: string }) {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label={label}
-      title={label}
-      className="flex h-6 shrink-0 items-center gap-1.5 px-1"
-    >
-      <Skeleton className="h-3 w-16 rounded-sm" />
-      <Skeleton className="h-3 w-10 rounded-sm" />
-    </div>
-  )
-}
-
-// Groups for the searchable + virtualized model picker, or `null` when the
-// option should keep the lightweight selectors. Only the MODEL option, and only
-// when its list is long enough to jank, qualifies. Falls back to a single
-// headerless group for a long flat (un-prefixed) list.
-function modelPickerGroups(
-  option: SessionConfigOptionInfo
-): ModelOptionGroup[] | null {
-  if (!isModelConfigOption(option)) return null
-  if (option.kind.type !== "select") return null
-  if (option.kind.options.length <= MODEL_LIST_VIRTUALIZE_THRESHOLD) return null
-  // Preserve derived `provider/` groups, server-provided groups, or a flat list
-  // (never silently flatten server groups — keeps wide/collapsed consistent).
-  return modelListGroups(option)
-}
-
 export function MessageInput({
   onSend,
   placeholder,
@@ -381,6 +329,7 @@ export function MessageInput({
   onConfigOptionChange,
   agentType,
   availableCommands,
+  promptSuggestion,
   commandsLoading = false,
   promptCapabilities,
   attachmentTabId,
@@ -410,16 +359,19 @@ export function MessageInput({
   // upload / attachment toasts — read as a single coherent group when
   // scanning the file. Same namespace, no extra runtime cost.
   const tAttach = useTranslations("Folder.chat.messageInput")
-  // The `$` prefix autocomplete is Codex-only: Codex advertises very few
-  // native slash commands, so we augment the dropdown with the agent's
-  // skills read from disk. Other agents already surface their full command
-  // set through ACP `availableCommands`, so injecting skills there would
-  // be duplicate/extra UI noise — skip the skills fetch for them entirely.
-  const skillAgentType = agentType === "codex" ? "codex" : null
+  // Skills read from disk feed the menu only for an agent that does not
+  // advertise them itself: Codex under `$` (its native command set is very
+  // small), Antigravity under `/` beside its commands (its ACP server lists
+  // only its built-ins). Every other agent surfaces its skills through ACP
+  // `availableCommands`, so a disk scan would only repeat them — skip it.
+  const skillTrigger = diskSkillTrigger(agentType)
   // Pass the working dir so we see both global skills and folder-scoped
   // project skills (e.g. `{folder}/.codex/skills`). Without this, users
   // only ever saw global skills in the `$` autocomplete.
-  const availableSkills = useAgentSkills(skillAgentType, defaultPath ?? null)
+  const availableSkills = useAgentSkills(
+    skillTrigger ? (agentType ?? null) : null,
+    defaultPath ?? null
+  )
   const skillPrefix = agentType === "codex" ? "$" : "/"
   // Exactly what the `/`·`$` menu below can offer. Seeding or pasting text turns
   // a bare `/cmd`·`$skill` token into a badge only when it is on this list, so
@@ -445,6 +397,16 @@ export function MessageInput({
   const { shortcuts } = useShortcutSettings()
   const effectiveDraftStorageKey = draftStorageKey ?? null
   const resolvedPlaceholder = placeholder ?? t("askAnything")
+  // The predicted follow-up prompt, only where sending it could follow: never
+  // mid-turn (Enter then queues or steers), never into a queued message being
+  // edited, never into a composer that cannot send.
+  const offeredSuggestion =
+    !isPrompting && !disabled && !isEditingQueueItem
+      ? promptSuggestion?.trim() || null
+      : null
+  const shownPlaceholder = offeredSuggestion
+    ? t("promptSuggestion", { suggestion: offeredSuggestion })
+    : resolvedPlaceholder
   const editorRef = useRef<RichComposerHandle>(null)
   // Prompt-history navigation. `historyRef` is seeded from `getSentHistory`
   // lazily, the first time the user steps into history, so a session that never
@@ -507,14 +469,6 @@ export function MessageInput({
     logLabel: "MessageInput",
   })
 
-  // Collapsed (narrow) selectors live in a controlled Popover holding a
-  // master–detail panel (`SessionSelectorsPanel`). It's controlled so a value
-  // pick closes it explicitly — matching the prior cog menu, which also closed
-  // on every selection.
-  const [collapsedSelectorsOpen, setCollapsedSelectorsOpen] = useState(false)
-  // Keep the collapsed settings popover open while dragging the (virtualized)
-  // model list's native scrollbar — see `useScrollbarSafeDismiss`.
-  const collapsedSelectorsGuard = useScrollbarSafeDismiss()
   // Whether the async Clipboard read API is usable here. It's absent in
   // non-secure web deployments served over HTTP/LAN (see installClipboardFallback
   // in lib/utils, which only shims writeText), so the composer's custom
@@ -687,12 +641,26 @@ export function MessageInput({
   // editor a tick after mount (mirrors the hydration effect's gate). Ordered
   // after that hydration effect so this rAF runs after its setContent, landing
   // the caret at the end of a restored draft rather than before it.
+  //
+  // Skipped on a coarse pointer, where focusing the editor raises the soft
+  // keyboard over the transcript. Each trigger here is a moment the user is
+  // more likely reading than typing: a session opening, a switch to one, a turn
+  // ending. Tapping the composer still focuses it (natively in the text, the
+  // chrome-press handler in the padding), so the keyboard comes up on demand.
+  // The pointer kind is read when the focus would happen, not subscribed to.
+  // Every open tab keeps its composer mounted, so a subscription would cost
+  // each one a listener and a re-render on every pointer change. As a
+  // dependency here it would also focus an idle composer when the pointer turns
+  // fine (a 2-in-1 docking to its mouse).
   useEffect(() => {
-    if (isActive && composerReady && !isPrompting) {
-      requestAnimationFrame(() => {
-        editorRef.current?.focus()
-      })
-    }
+    if (!isActive || !composerReady || isPrompting) return
+    if (isPrimaryPointerCoarse()) return
+    const raf = requestAnimationFrame(() => {
+      editorRef.current?.focus()
+    })
+    // Dropped if the tab goes inactive or a turn starts before the frame runs.
+    // A tiled group keeps that composer on screen, where it would take the caret.
+    return () => cancelAnimationFrame(raf)
   }, [isActive, composerReady, isPrompting])
 
   // Re-hydrate when the user (re)edits a *different* queue item after the
@@ -888,11 +856,9 @@ export function MessageInput({
     setComposerReady(true)
   }, [])
 
-  // Localised HERE, once, rather than at each selector: the composer renders
-  // this data through three independent paths (the searchable model picker,
-  // the inline dropdowns, and the collapsed panel's own projection), and a
-  // per-selector fix leaves whichever one the reader is not looking at in the
-  // agent's own language. Non-DeepSeek agents get their arrays back unchanged,
+  // Localised HERE, once, at the source: the settings chip, its accessible
+  // name and every control in its popover all read these arrays, so one pass
+  // covers them all. Non-DeepSeek agents get their arrays back unchanged,
   // identity included, so the memos below do not churn.
   const vocabulary = useAgentVocabulary(agentType)
   const availableModes = useMemo(
@@ -923,11 +889,6 @@ export function MessageInput({
   const showSelectorsLoading = showConfigLoading || showModeLoading
   const hasAnySelector =
     hasConfigOptions || showModeSelector || showSelectorsLoading
-  // The loading placeholder takes the inline slot too, not just the collapsed
-  // popover's row: at composer widths the chips would occupy, "still loading"
-  // has to be visible without opening anything.
-  const hasInlineSelectors =
-    hasConfigOptions || showModeSelector || showSelectorsLoading
   const hasFolderBranchPicker = useConversationFolderBranchPickerVisible(
     attachmentTabId,
     folderPickerOverride
@@ -941,9 +902,10 @@ export function MessageInput({
   //
   // The slash list shows the agent's own `availableCommands` verbatim —
   // experts are advertised as commands and now appear here alongside the
-  // rest. Codex additionally gets a `$`-triggered skills list (experts are
-  // symlinked skills, so they surface there) because its native command set
-  // is very small.
+  // rest. An agent that does not advertise its skills also gets the ones read
+  // from disk (experts are symlinked skills, so they surface there too): Codex
+  // on a `$`-triggered list, because its native command set is very small, and
+  // Antigravity after its commands on `/`.
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   // The trigger char (`/` for agent commands, `$` for Codex skills) and the
@@ -963,23 +925,29 @@ export function MessageInput({
     return rankByTextMatch(slashFilter, slashCommands, (cmd) => cmd.name)
   }, [slashMenuOpen, slashCommands, slashTriggerChar, slashFilter])
   const filteredSlashSkills = useMemo(() => {
-    // Skills autocomplete is Codex-only and triggered by `$`.
-    if (agentType !== "codex") return []
+    // Disk skills are listed only under the trigger their agent invokes them by.
+    if (!skillTrigger || slashTriggerChar !== skillTrigger) return []
     if (!slashMenuOpen || availableSkills.length === 0) return []
-    if (slashTriggerChar !== "$") return []
     return rankByTextMatch(
       slashFilter,
-      availableSkills,
+      skillsForMenu(availableSkills, slashCommands, skillTrigger),
       (skill) => skill.name,
       (skill) => skill.id
     )
-  }, [slashMenuOpen, availableSkills, agentType, slashTriggerChar, slashFilter])
+  }, [
+    slashMenuOpen,
+    availableSkills,
+    slashCommands,
+    skillTrigger,
+    slashTriggerChar,
+    slashFilter,
+  ])
   const slashAutocompleteCount =
     filteredSlashCommands.length + filteredSlashSkills.length
   // `/` is fed by the agent's own command list, which only exists once the
   // connection is up — so while it is being established the panel shows a
-  // loading row rather than nothing at all. `$` (Codex skills) is read from
-  // disk and never waits on a connection.
+  // loading row rather than nothing at all. Disk skills (Codex's `$` list,
+  // Antigravity's `/` rows) never wait on a connection.
   const slashLoading =
     slashMenuOpen &&
     slashTriggerChar === "/" &&
@@ -1013,7 +981,12 @@ export function MessageInput({
     if (!slashMenuOpen || slashAutocompleteCount === 0) return
     const container = slashMenuListRef.current
     if (!container) return
-    const el = container.children[slashSelectedIndex] as HTMLElement | undefined
+    // Rows by their marker, not by child position: the loading row can sit
+    // above them (an agent's disk skills show while its commands still load).
+    const el =
+      container.querySelectorAll<HTMLElement>("[data-slash-row]")[
+        slashSelectedIndex
+      ]
     if (!el) return
     const elTop = el.offsetTop
     const elBottom = elTop + el.offsetHeight
@@ -1026,7 +999,8 @@ export function MessageInput({
     }
   }, [slashMenuOpen, slashSelectedIndex, slashAutocompleteCount])
 
-  // ── Editor-driven `/` (commands) and `$` (Codex skills) trigger detection ──
+  // ── Editor-driven `/` (commands, plus Antigravity's skills) and `$` (Codex
+  // skills) trigger detection ──
   // The `@` mention panel is now owned by RichComposer; this only handles the
   // runtime-command menus. We inspect the text before the collapsed caret in the
   // current block: a `/` (any agent) or `$` (Codex) at the start or right after
@@ -1049,26 +1023,32 @@ export function MessageInput({
       " "
     )
     const regex =
-      agentType === "codex" ? /(^|\s)([/$])(\S*)$/ : /(^|\s)(\/)(\S*)$/
+      skillTrigger === "$" ? /(^|\s)([/$])(\S*)$/ : /(^|\s)(\/)(\S*)$/
     const match = before.match(regex)
     if (!match) return close()
     const trigger = match[2] as "/" | "$"
-    // Only `/` is gated here. Its source is the agent's own command list, which
-    // exists only once the connection is up — so an empty list means "nothing to
-    // show" unless the connection is still coming, where the panel opens on a
-    // loading row instead. `$` (the on-disk Codex skills) is deliberately
-    // ungated: `useAgentSkills` reports an in-flight scan as an empty list, so
-    // closing on empty would strand a `$` typed before the scan lands. Left
-    // open, the panel simply stays hidden until the skills arrive and then
-    // fills itself in — no second keystroke needed.
-    if (trigger === "/" && slashCommands.length === 0 && !commandsLoading) {
+    // Only a commands-only `/` is gated here. Its source is the agent's own
+    // command list, which exists only once the connection is up — so an empty
+    // list means "nothing to show" unless the connection is still coming, where
+    // the panel opens on a loading row instead. A trigger that also lists disk
+    // skills (Codex's `$`, Antigravity's `/`) is deliberately ungated:
+    // `useAgentSkills` reports an in-flight scan as an empty list, so closing on
+    // empty would strand a trigger typed before the scan lands. Left open, the
+    // panel simply stays hidden until the skills arrive and then fills itself
+    // in — no second keystroke needed.
+    if (
+      trigger === "/" &&
+      skillTrigger !== "/" &&
+      slashCommands.length === 0 &&
+      !commandsLoading
+    ) {
       return close()
     }
     setSlashTriggerChar(trigger)
     setSlashFilter(match[3])
     setSlashSelectedIndex(0)
     setSlashMenuOpen(true)
-  }, [slashCommands.length, commandsLoading, agentType])
+  }, [slashCommands.length, commandsLoading, skillTrigger])
 
   useEffect(() => {
     detectSlashTriggerRef.current = detectSlashTrigger
@@ -1097,9 +1077,10 @@ export function MessageInput({
 
   // Replace the live `/`-or-`$` token immediately before the caret with
   // an inline reference badge (+ a trailing space unless one already follows),
-  // then close the menu. Used by both the command (`/`) and Codex-skill (`$`)
-  // selections — the badge serializes back to its literal `/cmd` / `$skill`
-  // token on send (see invocation-reference / referenceToMarkdown).
+  // then close the menu. Used by both the command (`/`) and disk-skill (`$` for
+  // Codex, `/` for Antigravity) selections — the badge serializes back to its
+  // literal `/cmd` / `$skill` token on send (see invocation-reference /
+  // referenceToMarkdown).
   const replaceTriggerWithReference = useCallback(
     (ref: ReferenceAttrs) => {
       const editor = editorRef.current?.getEditor()
@@ -1531,6 +1512,17 @@ export function MessageInput({
     historyDraftRef.current = null
   }, [clearAttachments, closeSlashMenu])
 
+  // Async steering must compare against the current draft, including images
+  // added or removed while delivery was awaiting confirmation.
+  const currentComposerRef = useRef({
+    buildDraft,
+    draftStorageKey: effectiveDraftStorageKey,
+  })
+  currentComposerRef.current = {
+    buildDraft,
+    draftStorageKey: effectiveDraftStorageKey,
+  }
+
   const handleSend = useCallback(() => {
     // The editor stays editable while `disabled` (the agent is busy) so the user
     // can keep typing, but a plain send is blocked — only enqueue / queue-edit
@@ -1607,10 +1599,23 @@ export function MessageInput({
     }
     const draft = buildDraft()
     if (!draft) return
+    const sentEditor = editorRef.current?.getEditor()
+    // Keep the whole edited draft: appending during delivery can retain text
+    // already sent, but clearing or trimming it would discard the user's edits.
+    const clearSentDraft = () => {
+      const current = currentComposerRef.current
+      if (
+        current.draftStorageKey === effectiveDraftStorageKey &&
+        editorRef.current?.getEditor() === sentEditor &&
+        JSON.stringify(current.buildDraft()) === JSON.stringify(draft)
+      ) {
+        resetComposer()
+      }
+    }
     const enqueueInstead = () => {
       if (!onEnqueue) return
       onEnqueue(draft, showModeSelector ? effectiveModeId : null)
-      resetComposer()
+      clearSentDraft()
       toast.info(t("steerQueuedInstead"))
     }
     const payload = buildSteerPayload(draft)
@@ -1618,7 +1623,7 @@ export function MessageInput({
     setSteering(true)
     try {
       await onSteer(payload.text, payload.blocks)
-      resetComposer()
+      clearSentDraft()
     } catch (err) {
       if (isNoActiveTurnRejection(err)) {
         // The turn ended in the race window — reroute through the queue.
@@ -1641,6 +1646,7 @@ export function MessageInput({
     onEnqueue,
     showModeSelector,
     effectiveModeId,
+    effectiveDraftStorageKey,
     resetComposer,
     steerChannel,
     t,
@@ -1738,200 +1744,32 @@ export function MessageInput({
   const boxMinHeight = composerBoxMinHeight(tall)
   const editableMinHeight = composerEditableMinHeight(tall, hasImageAttachments)
 
-  const inlineSelectorItems = (
-    <>
-      {showSelectorsLoading && (
-        <SelectorLoadingPlaceholder
-          label={showConfigLoading ? t("loadingSettings") : t("loadingMode")}
-        />
-      )}
-      {hasConfigOptions &&
-        availableConfigOptions.map((option) => {
-          // On/off options flip in place — a dropdown for a binary choice is a
-          // wasted interaction.
-          if (option.kind.type === "boolean") {
-            return (
-              <InlineSessionConfigToggle
-                key={option.id}
-                option={option}
-                onLabel={t("toggleOn")}
-                offLabel={t("toggleOff")}
-                onSelect={(configId, value) =>
-                  onConfigOptionChange?.(configId, value)
-                }
-              />
-            )
-          }
-          // Long model lists get the searchable + virtualized popover (a Radix
-          // menu of hundreds of items is the scroll jank); every other option —
-          // and short model lists — keep the lightweight inline dropdown.
-          const listGroups = modelPickerGroups(option)
-          if (listGroups) {
-            return (
-              <ModelOptionPicker
-                key={option.id}
-                option={option}
-                groups={listGroups}
-                onSelect={(configId, valueId) =>
-                  onConfigOptionChange?.(configId, valueId)
-                }
-              />
-            )
-          }
-          return (
-            <InlineSessionConfigSelector
-              key={option.id}
-              option={option}
-              derivedGroups={deriveModelGroups(option)}
-              recommendedLabel={t("recommendedBadge")}
-              onSelect={(configId, valueId) =>
-                onConfigOptionChange?.(configId, valueId)
-              }
-            />
-          )
-        })}
-      {showModeSelector && (
-        <InlineModeSelector
-          modes={availableModes}
-          selectedModeId={effectiveModeId!}
-          onSelect={handleModeSelect}
-          label={t("modeLabel")}
-        />
-      )}
-    </>
+  // The agent's settings — its config options, or the legacy mode list for an
+  // agent that publishes none (the two never show together, see
+  // `showModeSelector`) — as the one ordered list the settings chip edits.
+  const sessionSettings = useMemo(
+    () =>
+      buildSessionSettings({
+        configOptions: availableConfigOptions,
+        modes: showModeSelector ? availableModes : [],
+        currentModeId: showModeSelector ? effectiveModeId : null,
+        modeTitle: t("modeLabel"),
+      }),
+    [
+      availableConfigOptions,
+      showModeSelector,
+      availableModes,
+      effectiveModeId,
+      t,
+    ]
   )
-
-  // Normalized settings for the collapsed (narrow) master–detail panel. Config
-  // options and the mode picker are mutually exclusive in this UI (see
-  // `showModeSelector`), but both are mapped so the panel stays agnostic.
-  const collapsedSettings = useMemo<SessionSelectorSetting[]>(() => {
-    const result: SessionSelectorSetting[] = []
-    if (hasConfigOptions) {
-      for (const option of availableConfigOptions) {
-        // An on/off option becomes a two-item headerless group — the same shape
-        // the mode picker below uses — so the panel needs no toggle affordance
-        // of its own.
-        if (option.kind.type === "boolean") {
-          const checked = option.kind.current_value
-          result.push({
-            key: `config:${option.id}`,
-            title: option.name,
-            currentValue: checked ? "true" : "false",
-            currentLabel: checked ? t("toggleOn") : t("toggleOff"),
-            groups: [
-              {
-                key: "__boolean__",
-                name: null,
-                options: [
-                  { value: "true", name: t("toggleOn"), description: null },
-                  { value: "false", name: t("toggleOff"), description: null },
-                ],
-              },
-            ],
-            onSelect: (value) => onConfigOptionChange?.(option.id, value),
-          })
-          continue
-        }
-        if (option.kind.type !== "select") continue
-        const kind = option.kind
-        // Model values that carry a `provider/` prefix group by provider; every
-        // other option keeps its server groups or stays flat (`null` derived).
-        const derived = deriveModelGroups(option)
-        const groups: SessionSelectorGroup[] = derived
-          ? derived.map((group) => ({
-              key: group.key,
-              name: group.name,
-              options: group.options.map((item) => ({
-                value: item.value,
-                name: item.name,
-                description: item.description,
-              })),
-            }))
-          : kind.groups.length > 0
-            ? kind.groups.map((group) => ({
-                key: group.group,
-                name: group.name,
-                options: group.options.map((item) => ({
-                  value: item.value,
-                  name: item.name,
-                  description: item.description,
-                })),
-              }))
-            : [
-                {
-                  key: "__flat__",
-                  name: null,
-                  options: kind.options.map((item) => ({
-                    value: item.value,
-                    name: item.name,
-                    description: item.description,
-                  })),
-                },
-              ]
-        // Resolve the left-rail summary against the built groups so a grouped
-        // model shows its prefix-stripped name (the provider is implied) rather
-        // than repeating `provider/`.
-        const current = groups
-          .flatMap((group) => group.options)
-          .find((item) => item.value === kind.current_value)
-        // A long model list gets a searchable + virtualized detail pane (a plain
-        // list of hundreds of buttons janks); short lists keep plain buttons.
-        const searchable =
-          isModelConfigOption(option) &&
-          kind.options.length > MODEL_LIST_VIRTUALIZE_THRESHOLD
-        result.push({
-          key: `config:${option.id}`,
-          title: option.name,
-          currentValue: kind.current_value,
-          currentLabel: current?.name ?? kind.current_value,
-          groups,
-          recommendedValue: option.recommended_value,
-          onSelect: (value) => onConfigOptionChange?.(option.id, value),
-          ...(searchable && {
-            search: {
-              placeholder: t("searchModel"),
-              inputLabel: t("searchModelAria"),
-              listLabel: t("modelListLabel"),
-              empty: t("noModels"),
-            },
-          }),
-        })
-      }
-    }
-    if (showModeSelector) {
-      const selected = availableModes.find(
-        (mode) => mode.id === effectiveModeId
-      )
-      result.push({
-        key: "mode",
-        title: t("modeLabel"),
-        currentValue: effectiveModeId ?? "",
-        currentLabel: selected?.name ?? effectiveModeId ?? "",
-        groups: [
-          {
-            key: "__modes__",
-            name: null,
-            options: availableModes.map((mode) => ({
-              value: mode.id,
-              name: mode.name,
-              description: mode.description,
-            })),
-          },
-        ],
-        onSelect: (value) => handleModeSelect(value),
-      })
-    }
-    return result
-  }, [
-    hasConfigOptions,
-    availableConfigOptions,
-    showModeSelector,
-    availableModes,
-    effectiveModeId,
-    onConfigOptionChange,
-    handleModeSelect,
-    t,
-  ])
+  const handleSessionSettingChange = useCallback(
+    (target: SessionSettingTarget, value: string) => {
+      if (target.type === "mode") handleModeSelect(value)
+      else onConfigOptionChange?.(target.configId, value)
+    },
+    [handleModeSelect, onConfigOptionChange]
+  )
 
   const actionButtons = isEditingQueueItem ? (
     <div className="flex items-center gap-1">
@@ -2075,6 +1913,7 @@ export function MessageInput({
               <button
                 key={`cmd-${cmd.name}`}
                 type="button"
+                data-slash-row=""
                 className={cn(
                   "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm",
                   i === slashSelectedIndex
@@ -2086,12 +1925,7 @@ export function MessageInput({
                   handleSlashSelect(cmd)
                 }}
               >
-                <span className="shrink-0 font-mono text-primary">
-                  {commandInvocationToken(cmd.name)}
-                </span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {cmd.description}
-                </span>
+                <CommandOptionLabel command={cmd} />
               </button>
             ))}
             {filteredSlashSkills.map((skill, i) => {
@@ -2100,6 +1934,7 @@ export function MessageInput({
                 <button
                   key={`skill-${skill.scope}-${skill.id}`}
                   type="button"
+                  data-slash-row=""
                   className={cn(
                     "flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left text-sm",
                     absoluteIndex === slashSelectedIndex
@@ -2205,8 +2040,9 @@ export function MessageInput({
               />
               <RichComposer
                 ref={editorRef}
-                placeholder={resolvedPlaceholder}
+                placeholder={shownPlaceholder}
                 ariaLabel={resolvedPlaceholder}
+                promptSuggestion={offeredSuggestion}
                 autoFocus={autoFocus}
                 referenceSearch={referenceSearch}
                 mentionUiLabels={mentionUiLabels}
@@ -2246,79 +2082,19 @@ export function MessageInput({
                     onAddFeedback={onAddFeedback}
                     feedbackAddDisabled={feedbackAddDisabled}
                   />
-                  {hasInlineSelectors && (
-                    <div className="hidden min-w-0 items-end gap-1 @[30rem]:flex">
-                      {inlineSelectorItems}
-                    </div>
-                  )}
                   {hasAnySelector && (
-                    <div
-                      className={cn(
-                        "flex",
-                        hasInlineSelectors && "@[30rem]:hidden"
-                      )}
-                    >
-                      <Popover
-                        open={collapsedSelectorsOpen}
-                        onOpenChange={setCollapsedSelectorsOpen}
-                      >
-                        {/* Suppressed while the panel is open — the Popover is
-                            non-modal, so the trigger keeps taking hover under
-                            it (see SelectorTooltip). */}
-                        <SelectorTooltip
-                          label={t("agentSettings")}
-                          suppressed={collapsedSelectorsOpen}
-                        >
-                          <PopoverTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              className="shrink-0"
-                              aria-label={t("agentSettings")}
-                            >
-                              {agentType ? (
-                                <AgentIcon
-                                  agentType={agentType}
-                                  className="size-3"
-                                />
-                              ) : (
-                                <Cog className="size-3" />
-                              )}
-                            </Button>
-                          </PopoverTrigger>
-                        </SelectorTooltip>
-                        <PopoverContent
-                          ref={collapsedSelectorsGuard.contentRef}
-                          side="top"
-                          align="start"
-                          aria-label={t("agentSettings")}
-                          onPointerDownOutside={
-                            collapsedSelectorsGuard.onPointerDownOutside
-                          }
-                          onFocusOutside={
-                            collapsedSelectorsGuard.onFocusOutside
-                          }
-                          className="w-[22rem] max-w-[calc(100vw-1rem)] p-1"
-                        >
-                          {showConfigLoading && (
-                            <SelectorLoadingChip label={t("loadingSettings")} />
-                          )}
-                          {showModeLoading && (
-                            <SelectorLoadingChip label={t("loadingMode")} />
-                          )}
-                          {collapsedSettings.length > 0 && (
-                            <SessionSelectorsPanel
-                              settings={collapsedSettings}
-                              settingsLabel={t("agentSettings")}
-                              recommendedLabel={t("recommendedBadge")}
-                              onAfterSelect={() =>
-                                setCollapsedSelectorsOpen(false)
-                              }
-                            />
-                          )}
-                        </PopoverContent>
-                      </Popover>
-                    </div>
+                    <SessionSettingsPicker
+                      agentType={agentType ?? null}
+                      settings={sessionSettings}
+                      loadingLabel={
+                        showSelectorsLoading
+                          ? showConfigLoading
+                            ? t("loadingSettings")
+                            : t("loadingMode")
+                          : null
+                      }
+                      onChange={handleSessionSettingChange}
+                    />
                   )}
                 </div>
                 <div className="shrink-0">{actionButtons}</div>
