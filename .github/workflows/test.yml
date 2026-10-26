@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - ci/antigravity-ask-question-20261027
   pull_request:
 
 env:
