@@ -1,4 +1,15 @@
 {
+  "HtmlCodePreview": {
+    "code": "コード",
+    "preview": "プレビュー",
+    "title": "HTML プレビュー",
+    "generating": "HTML を生成中…",
+    "expand": "すべて表示",
+    "collapse": "折りたたむ",
+    "settingsTitle": "チャットの HTML 表示",
+    "settingsDescription": "AI の返信内に自己完結した HTML/CSS カードや図を表示します。モデルのスクリプトと外部リソースはブロックされます。",
+    "settingsEnable": "リッチ HTML 表示を有効化"
+  },
   "Language": {
     "followSystem": "システムに従う",
     "english": "英語",

@@ -1,4 +1,15 @@
 {
+  "HtmlCodePreview": {
+    "code": "코드",
+    "preview": "미리 보기",
+    "title": "HTML 미리 보기",
+    "generating": "HTML 생성 중…",
+    "expand": "모두 표시",
+    "collapse": "접기",
+    "settingsTitle": "채팅 HTML 렌더링",
+    "settingsDescription": "AI 응답에 자체 포함된 HTML/CSS 카드와 도표를 표시합니다. 모델 스크립트와 외부 리소스는 차단됩니다.",
+    "settingsEnable": "리치 HTML 렌더링 사용"
+  },
   "Language": {
     "followSystem": "시스템 설정 따름",
     "english": "영어",

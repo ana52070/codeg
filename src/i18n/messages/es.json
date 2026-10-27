@@ -1,4 +1,15 @@
 {
+  "HtmlCodePreview": {
+    "code": "Código",
+    "preview": "Vista previa",
+    "title": "Vista previa de HTML",
+    "generating": "Generando HTML…",
+    "expand": "Mostrar todo",
+    "collapse": "Contraer",
+    "settingsTitle": "Renderizado HTML en el chat",
+    "settingsDescription": "Muestra tarjetas y diagramas HTML/CSS autocontenidos en las respuestas de la IA. Se bloquean los scripts del modelo y los recursos externos.",
+    "settingsEnable": "Activar renderizado HTML enriquecido"
+  },
   "Language": {
     "followSystem": "Seguir el sistema",
     "english": "Inglés",

@@ -1,4 +1,15 @@
 {
+  "HtmlCodePreview": {
+    "code": "Code",
+    "preview": "Aperçu",
+    "title": "Aperçu HTML",
+    "generating": "Génération HTML…",
+    "expand": "Tout afficher",
+    "collapse": "Réduire",
+    "settingsTitle": "Rendu HTML dans le chat",
+    "settingsDescription": "Afficher des cartes et diagrammes HTML/CSS autonomes dans les réponses de l’IA. Les scripts du modèle et les ressources externes sont bloqués.",
+    "settingsEnable": "Activer le rendu HTML enrichi"
+  },
   "Language": {
     "followSystem": "Suivre le système",
     "english": "Anglais",

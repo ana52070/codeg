@@ -1,4 +1,15 @@
 {
+  "HtmlCodePreview": {
+    "code": "Code",
+    "preview": "Vorschau",
+    "title": "HTML-Vorschau",
+    "generating": "HTML wird erstellt…",
+    "expand": "Alles anzeigen",
+    "collapse": "Einklappen",
+    "settingsTitle": "HTML-Darstellung im Chat",
+    "settingsDescription": "Eigenständige HTML/CSS-Karten und Diagramme direkt in KI-Antworten anzeigen. Modellskripte und externe Ressourcen werden blockiert.",
+    "settingsEnable": "Erweiterte HTML-Darstellung aktivieren"
+  },
   "Language": {
     "followSystem": "Systemsprache verwenden",
     "english": "Englisch",

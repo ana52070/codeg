@@ -1,4 +1,15 @@
 {
+  "HtmlCodePreview": {
+    "code": "Código",
+    "preview": "Prévia",
+    "title": "Prévia de HTML",
+    "generating": "Gerando HTML…",
+    "expand": "Mostrar tudo",
+    "collapse": "Recolher",
+    "settingsTitle": "Renderização HTML no chat",
+    "settingsDescription": "Mostra cartões e diagramas HTML/CSS autocontidos nas respostas da IA. Scripts do modelo e recursos externos são bloqueados.",
+    "settingsEnable": "Ativar renderização HTML avançada"
+  },
   "Language": {
     "followSystem": "Seguir o sistema",
     "english": "Inglês",
