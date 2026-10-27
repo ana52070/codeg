@@ -32,5 +32,8 @@
 
 - 后端回归用例覆盖正文匹配、原有筛选条件、Unicode 片段截取、每个会话最多 3 条预览，以及 HTTP 搜索接口的认证和响应结构。
 - 前端回归用例覆盖正文命中不被标题二次过滤、过期请求丢弃、点击定位、历史消息加载、用户和助手消息 ID 重复、目标不存在的提示，以及折叠消息的自动展开。
-- 本地相关前端测试 42 项通过，修改文件 ESLint 通过。测试者已完成桌面版搜索预览和定位的手动验证。
-- fork GitHub Actions 预检：[Test #13](https://github.com/ana52070/codeg/actions/runs/40517590711)，提交 `0dcae9e3b88d540e0bd8de89aa562362e7eaa7c1`；当前结果待运行完成后更新。正式上游 PR 尚未创建。
+- 已在桌面版手动验证正文检索、命中预览和点击定位。
+- fork GitHub Actions 预检：[Test #13](https://github.com/ana52070/codeg/actions/runs/40517590711)，对应提交 `0dcae9e3b88d540e0bd8de89aa562362e7eaa7c1`：13 项任务中 12 项成功，1 项因 runner 资源不足取消。
+- 前端 lint、浏览器代理产物一致性与类型检查、静态导出构建均通过；751 个测试文件、11,069 项前端测试全部通过。
+- Linux、macOS、Windows 的 Rust desktop/server/cli 矩阵全部通过，包括各自的 Clippy 检查。Windows desktop 按仓库工作流只编译测试目标，不执行测试；Linux/macOS desktop 和 Windows server 执行对应测试。
+- Linux 安装脚本及 Windows PowerShell 5.1 安装脚本检查通过。[macOS 安装脚本任务](https://github.com/ana52070/codeg/actions/runs/40517590711/job/122235144320)因 GitHub 托管 macOS ARM64 runner 容量不足，始终未获得 runner 而被取消；没有执行脚本，也没有测试失败记录。
