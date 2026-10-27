@@ -10,6 +10,10 @@ import {
 import { formatElapsedLabel } from "@/lib/format-elapsed"
 import { cn } from "@/lib/utils"
 import {
+  useChatProcessCollapse,
+  type ChatProcessCollapseMode,
+} from "@/lib/chat-process-collapse"
+import {
   Collapsible,
   CollapsibleContent,
 } from "@/components/ui/instant-collapsible"
@@ -72,6 +76,16 @@ const manualFold = new WeakMap<
   { epoch: number; open: boolean }
 >()
 
+interface ProcessFoldChoice {
+  mode: ChatProcessCollapseMode
+  epoch: number
+  settled: boolean
+  open?: boolean
+}
+
+// 与现有手动折叠相同，保留虚拟列表卸载前的选择，并随 parts 回收。
+const processFold = new WeakMap<AdaptedContentPart[], ProcessFoldChoice>()
+
 export const CompletedTurnContent = memo(function CompletedTurnContent({
   parts,
   durationMs,
@@ -95,6 +109,7 @@ export const CompletedTurnContent = memo(function CompletedTurnContent({
   foldEpoch?: number
 }) {
   const tElapsed = useTranslations("Folder.chat.liveTurnStats")
+  const collapseMode = useChatProcessCollapse()
   const split = useMemo(() => splitAssistantTurnParts(parts), [parts])
 
   const [localOpen, setLocalOpen] = useState(() => {
@@ -127,7 +142,30 @@ export const CompletedTurnContent = memo(function CompletedTurnContent({
     }
   }
 
-  const open = currentRound ? roundOpen : localOpen
+  // 结束后折叠模式在结束时重置一次；之后用户仍可重新展开。
+  const settled = collapseMode === "after-completion" && completed
+  const [processChoice, setProcessChoice] = useState<ProcessFoldChoice>(
+    () =>
+      processFold.get(parts) ?? {
+        mode: collapseMode,
+        epoch: foldEpoch,
+        settled,
+      }
+  )
+  const choiceMatches =
+    processChoice.mode === collapseMode &&
+    processChoice.epoch === foldEpoch &&
+    processChoice.settled === settled
+  if (!choiceMatches) {
+    setProcessChoice({ mode: collapseMode, epoch: foldEpoch, settled })
+  }
+  const open =
+    collapseMode === "current"
+      ? currentRound
+        ? roundOpen
+        : localOpen
+      : ((choiceMatches ? processChoice.open : undefined) ??
+        (collapseMode === "after-completion" && !completed))
 
   // The unfold animation belongs to a real closed→open TOGGLE, never to a mount
   // that starts open. This component remounts while staying open: the
@@ -145,6 +183,17 @@ export const CompletedTurnContent = memo(function CompletedTurnContent({
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
+      if (collapseMode !== "current") {
+        const choice = {
+          mode: collapseMode,
+          epoch: foldEpoch,
+          settled,
+          open: next,
+        }
+        processFold.set(parts, choice)
+        setProcessChoice(choice)
+        return
+      }
       if (currentRound) {
         onRoundOpenChange?.(next)
         return
@@ -152,7 +201,7 @@ export const CompletedTurnContent = memo(function CompletedTurnContent({
       manualFold.set(parts, { epoch: foldEpoch, open: next })
       setLocalOpen(next)
     },
-    [currentRound, foldEpoch, onRoundOpenChange, parts]
+    [collapseMode, settled, currentRound, foldEpoch, onRoundOpenChange, parts]
   )
 
   const elapsed =
@@ -171,7 +220,7 @@ export const CompletedTurnContent = memo(function CompletedTurnContent({
   // has not been written yet, so applying it would withhold the toggle for the
   // whole stream and hand it over one beat before the turn ends. Folding a live
   // reply is then an explicit choice; the round settling re-applies the rule.
-  const foldable =
+  const canFold =
     split.progress.length > 0 && (!completed || hasVisibleAnswer(split.answer))
 
   // Streamdown's incomplete-markdown repair (remend) may only run on text that
@@ -212,6 +261,9 @@ export const CompletedTurnContent = memo(function CompletedTurnContent({
   // the rail when the open timeline is its last block, else under whatever
   // does end it (the answer being written, a folded body, no steps yet).
   const { awaitingUser } = useActivityLive()
+  // 自动折叠不能遮住失败或等待用户处理的交互。
+  const foldable =
+    canFold && (collapseMode === "current" || (!failureKey && !awaitingUser))
   const working = isStreaming && !awaitingUser
   const workingOnRail =
     working &&
