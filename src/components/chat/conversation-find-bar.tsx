@@ -14,10 +14,7 @@ import { useTranslations } from "next-intl"
 import type { ThreadRenderItem } from "@/components/message/message-list-view"
 import type { MessageScrollContextValue } from "@/components/message/message-scroll-context"
 import { searchConversationMessages } from "@/lib/api"
-import type {
-  AdaptedContentPart,
-  AdaptedMessage,
-} from "@/lib/adapters/ai-elements-adapter"
+import type { AdaptedContentPart } from "@/lib/adapters/ai-elements-adapter"
 import type { ConversationMessageMatch } from "@/lib/types"
 
 export interface ConversationFindBarProps {
