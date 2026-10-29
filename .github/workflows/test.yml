@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - ci/acp-system-prompts-preflight
   pull_request:
 
 env:
