@@ -1893,6 +1893,11 @@
     "zcode": {
       "adapterInfo": "Codeg exécute {adapterPackage} comme passerelle ACP. Installez ZCode et connectez-vous d’abord ; son environnement et sa configuration existants sont utilisés.",
       "runtimeHint": "Installez ZCode et connectez-vous d’abord. Codeg installe uniquement la passerelle ACP. Si la détection échoue, indiquez l’entrée CLI avec ZCODE_BIN et Node.js avec ZCODE_NODE. Gérez modèles et identifiants dans ZCode."
+    },
+    "quotaProbe": {
+      "label": "Official account quota monitoring",
+      "description": "Display remaining subscription quota in the chat composer status bar (preferring local CLI session logs with zero background polling). Automatically enabled for official account sign-in.",
+      "autoDisabledHint": "Automatically disabled because this agent is currently configured with a 3rd-party API key, custom endpoint, or Model Provider."
     }
   },
   "AgentVocabulary": {
@@ -2526,6 +2531,24 @@
         "loadFailed": "Impossible de lire l'état : {message}",
         "openSettings": "Ouvrir les paramètres",
         "refresh": "Actualiser"
+      },
+      "quota": {
+        "title": "Quota",
+        "triggerAria": "View agent quota",
+        "refresh": "Refresh quota",
+        "refreshing": "Refreshing…",
+        "shortWindow": "5-Hour Window",
+        "weeklyWindow": "Weekly Window",
+        "remaining": "Remaining",
+        "resetsSoon": "Resets soon",
+        "resetsIn": "Resets in {time}",
+        "days": "d",
+        "hours": "h",
+        "minutes": "m",
+        "seconds": "s",
+        "spendLimit": "Spend Limit",
+        "noQuota": "Quota unavailable",
+        "lastUpdated": "Updated {time}"
       }
     },
     "auxPanel": {
