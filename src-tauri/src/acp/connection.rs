@@ -2635,7 +2635,7 @@ pub async fn spawn_agent_connection(
     // that is not there yet is a failed launch rather than a graceful fallback.
     // `None` (isolation off, or the directory could not be created) means the
     // child inherits the ambient temp dir exactly as it did before.
-    let scratch = crate::acp::scratch_dir::create();
+    let scratch = crate::acp::scratch_dir::create_for_agent(agent_type);
     let agent = match build_agent(
         agent_type,
         &runtime_env,
