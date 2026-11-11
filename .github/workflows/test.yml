@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - ci/antigravity-custom-agent-ask-20261111
   pull_request:
 
 env:
