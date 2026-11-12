@@ -7,6 +7,8 @@ pub mod codebuddy;
 pub mod codex;
 pub mod codex_code_mode;
 mod codex_desktop_attachments;
+mod codex_async_questions;
+mod codex_file_citations;
 pub mod cursor;
 pub mod deepseek;
 pub mod gemini;
@@ -20,6 +22,7 @@ mod opencode_context_window;
 pub mod pi;
 pub mod qoder;
 mod summary_cache;
+mod trae_usage;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -172,8 +175,11 @@ pub fn external_transcript_sources() -> Vec<ExternalSource> {
             indexes: &[],
         },
         ExternalSource {
+            // The default file even when `$OPENCODE_DB` moves the database the
+            // history is read from: the archive keys this entry by file name,
+            // and only a `.db` name is snapshotted as SQLite.
             agent: "opencode",
-            root: opencode::resolve_opencode_base_dir().join("opencode.db"),
+            root: opencode::resolve_opencode_base_dir().join(opencode::OPENCODE_DB_FILE),
             is_file: true,
             sqlite: true,
             include_top: None,
@@ -419,12 +425,16 @@ pub fn build_agent_parser(agent_type: AgentType, env: &AgentEnv) -> Box<dyn Agen
         AgentType::Antigravity => Box::new(antigravity::AntigravityParser::for_env(env)),
         AgentType::Kiro => Box::new(kiro::KiroParser::for_env(env)),
         // Custom ACP agents have no native store to reverse-engineer; their
-        // history is codeg's own ACP transcript. TRAE CLI's rollouts use an
-        // undocumented paginated format of its own (see `acp::trae`), and so
-        // do Command Code's session trees (see `acp::command_code`), so both
-        // take the same route.
-        AgentType::Custom(_) | AgentType::ZCode | AgentType::Trae | AgentType::CommandCode => {
-            Box::new(acp_native::AcpNativeParser::new(agent_type))
+        // history is codeg's own ACP transcript. TRAE CLI takes the same route
+        // for message history, but AcpNativeParser enriches those turns from
+        // the precise token_usage_record rows in TRAE's native rollouts.
+        // Command Code's undocumented session tree remains ACP-only.
+        AgentType::Custom(_)
+        | AgentType::ZCode
+        | AgentType::Trae
+        | AgentType::CommandCode
+        | AgentType::MiniMaxCode => {
+            Box::new(acp_native::AcpNativeParser::for_env(agent_type, env))
         }
     };
     Box::new(RouteSanitized(inner))
@@ -1173,8 +1183,12 @@ pub fn infer_context_window_max_tokens(model: Option<&str>) -> Option<u64> {
             // `effective_context_window_percent: 95`. gpt-6 shares that profile
             // byte for byte (see `resources/codex/bundled-catalog.json`), so it
             // rides the same lane rather than falling through to `None` and
-            // leaving those sessions with no context meter at all.
-            if normalized.starts_with("gpt-5") || normalized.starts_with("gpt-6") {
+            // leaving those sessions with no context meter at all. The one
+            // exception is GPT-6.1 Terra (codex 0.165): `context_window:
+            // 500000` at the same 95%.
+            if normalized.starts_with("gpt-6.1-terra") {
+                Some(475_000)
+            } else if normalized.starts_with("gpt-5") || normalized.starts_with("gpt-6") {
                 Some(258_000)
             } else if normalized.starts_with("gpt-4o")
                 || normalized.starts_with("gpt-4.1")
@@ -2490,7 +2504,8 @@ mod tests {
         );
         // Natively 1M models need no marker: Claude Code's baked catalog
         // (CLI 2.1.293) flags Opus from 4.7, Sonnet from 5, Haiku from 5.5 and
-        // every Fable and Mythos as `native_1m`.
+        // every Fable and Mythos as `native_1m` (CLI 2.1.321 adds Fable 5.2 and
+        // Mythos 5.2, both `native_1m`).
         for model in [
             "claude-haiku-5-5",
             "claude-sonnet-5",
@@ -2502,7 +2517,9 @@ mod tests {
             "claude-opus-5-5",
             "claude-fable-5",
             "claude-fable-5-1",
+            "claude-fable-5-2",
             "claude-mythos-5-1",
+            "claude-mythos-5-2",
             "anthropic/claude-opus-4.7",
             "claude-opus-4-7@20260101",
         ] {
@@ -2575,6 +2592,19 @@ mod tests {
         );
         assert_eq!(
             infer_context_window_max_tokens(Some("gpt-5.6-sol")),
+            Some(258_000)
+        );
+        // …bar GPT-6.1 Terra, whose catalog window is 500K at the same 95%.
+        assert_eq!(
+            infer_context_window_max_tokens(Some("gpt-6.1-terra")),
+            Some(475_000)
+        );
+        assert_eq!(
+            infer_context_window_max_tokens(Some("openai/gpt-6.1-terra")),
+            Some(475_000)
+        );
+        assert_eq!(
+            infer_context_window_max_tokens(Some("gpt-6.1-sol")),
             Some(258_000)
         );
         // Kimi's k3 family is the 1M lane; k2.x stays on 256K. The provider

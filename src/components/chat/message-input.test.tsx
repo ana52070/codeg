@@ -21,6 +21,7 @@ import {
 } from "./composer/to-prompt-blocks"
 import {
   clearMessageInputDraftV2,
+  hasLiveComposerContent,
   loadMessageInputDraftV2,
   saveMessageInputDraftV2,
 } from "@/lib/message-input-draft"
@@ -124,6 +125,9 @@ vi.mock("@/hooks/use-open-file-target", () => ({
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
   quickMessagesList: vi.fn(async () => []),
+  // jsdom runs in web mode, where a dropped image is uploaded: keep that
+  // upload pending instead of letting a real fetch fail and drop the image.
+  uploadAttachment: vi.fn(() => new Promise(() => {})),
 }))
 // Real classifier only recognizes actual backend NoActiveTurn payloads; the
 // steering tests flip this per-case to drive the enqueue fallback.
@@ -144,6 +148,10 @@ type ComposerAttachmentsApi = ReturnType<
 const attachmentsOverride = vi.hoisted(() => ({
   current: null as Partial<ComposerAttachmentsApi> | null,
 }))
+// The real hook's latest result, for tests that drive it directly.
+const attachmentsCapture = vi.hoisted(() => ({
+  current: null as ComposerAttachmentsApi | null,
+}))
 vi.mock("./composer/use-composer-attachments", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("./composer/use-composer-attachments")>()
@@ -153,6 +161,7 @@ vi.mock("./composer/use-composer-attachments", async (importOriginal) => {
       ...args: Parameters<typeof actual.useComposerAttachments>
     ) => {
       const real = actual.useComposerAttachments(...args)
+      attachmentsCapture.current = real
       const override = attachmentsOverride.current
       return override ? { ...real, ...override } : real
     },
@@ -247,6 +256,13 @@ function renderInput(
     </NextIntlClientProvider>
   )
 }
+
+/** Runs the next animation frame inside act(), so what the composer defers to
+ *  a frame is committed — effects included — before the test goes on. */
+const nextFrame = () =>
+  act(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+  })
 
 describe("MessageInput (RichComposer integration)", () => {
   afterEach(() => cleanup())
@@ -388,12 +404,6 @@ describe("MessageInput (RichComposer integration)", () => {
         />
       </NextIntlClientProvider>
     )
-    const nextFrame = () =>
-      act(async () => {
-        await new Promise((resolve) =>
-          requestAnimationFrame(() => resolve(null))
-        )
-      })
     async function mountReady(isActive: boolean, coarse: boolean) {
       setPointer(coarse)
       saveMessageInputDraftV2(draftKey, {
@@ -832,6 +842,10 @@ describe("MessageInput injectContent", () => {
     blob: null,
   }
 
+  // Enter reaches the send through the editor's keymap, which takes the
+  // composer's latest send handler in an effect — so an image on screen is not
+  // in the send until React has run the effects of the render that showed it.
+  // A hand-back that gets sent therefore has its frame run inside act().
   function pressEnter(editor: Editor) {
     act(() => {
       ;(editor.view.dom as HTMLElement).dispatchEvent(
@@ -859,6 +873,7 @@ describe("MessageInput injectContent", () => {
         },
       })
     )
+    await nextFrame() // the hand-back's own frame
     await waitFor(() =>
       expect(serializeDocToText(editor.state.doc)).toBe(prose)
     )
@@ -892,6 +907,7 @@ describe("MessageInput injectContent", () => {
         },
       })
     )
+    await nextFrame() // the hand-back's own frame
     await waitFor(() =>
       expect(serializeDocToText(editor.state.doc).trim()).toBe(
         "and another thing\n\n12"
@@ -951,6 +967,7 @@ describe("MessageInput injectContent", () => {
         },
       })
     )
+    await nextFrame() // the hand-back's own frame
     await waitFor(() =>
       expect(serializeDocToText(editor.state.doc).trim()).toBe("first")
     )
@@ -962,6 +979,7 @@ describe("MessageInput injectContent", () => {
         },
       })
     )
+    await nextFrame() // the hand-back's own frame
     // (The space is the one a restored file badge always gets after it.)
     await waitFor(() =>
       expect(serializeDocToText(editor.state.doc).trim()).toBe(
@@ -1775,6 +1793,104 @@ describe("MessageInput slash menu rows", () => {
   })
 })
 
+// claude-agent-acp 0.99.1 marks Claude's skills among its commands: at first
+// only the ones whose SKILL.md it found on disk, and once Claude Code's own
+// skill list is read, all of them (a bundled one without a path). The menu
+// shows the marks only in that second list, so it never shows some skills
+// marked and others not.
+describe("MessageInput slash menu skill rows", () => {
+  afterEach(() => {
+    cleanup()
+    composerHandle.current = null
+  })
+
+  const USER_SKILL_PATH = "/home/u/.claude/skills/user-skill/SKILL.md"
+
+  async function openMenu(
+    availableCommands: React.ComponentProps<
+      typeof MessageInput
+    >["availableCommands"]
+  ) {
+    renderInput({ agentType: "claude_code", availableCommands })
+    await waitFor(
+      () => expect(composerHandle.current?.getEditor()).toBeTruthy(),
+      { timeout: 5000 }
+    )
+    const editor = composerHandle.current?.getEditor()
+    if (!editor) throw new Error("composer editor not mounted")
+    act(() => {
+      editor.commands.insertContent("/")
+    })
+    return screen.findByTestId("slash-menu")
+  }
+
+  function kindOf(menu: HTMLElement, token: string) {
+    const row = within(menu).getByText(token).closest("button") as HTMLElement
+    const column = row.querySelector<HTMLElement>("[data-command-kind]")
+    return {
+      kind: column?.dataset.commandKind ?? null,
+      icon: column?.querySelector("svg") != null,
+      text: row.textContent,
+    }
+  }
+
+  it("shows every skill with the skill icon once the agent has marked them all", async () => {
+    const menu = await openMenu([
+      {
+        name: "user-skill",
+        description: "User skill probe",
+        skill: true,
+        skill_path: USER_SKILL_PATH,
+      },
+      {
+        name: "simplify",
+        description: "Review the changed code",
+        input_hint: "[<target>]",
+        skill: true,
+      },
+      { name: "compact", description: "Compact the thread" },
+    ])
+    expect(kindOf(menu, "/user-skill")).toEqual({
+      kind: "skill",
+      icon: true,
+      text: "/user-skillUser skill probe",
+    })
+    expect(kindOf(menu, "/simplify")).toEqual({
+      kind: "skill",
+      icon: true,
+      text: "/simplify[<target>]Review the changed code",
+    })
+    // A command keeps an empty column, so the tokens line up.
+    expect(kindOf(menu, "/compact")).toEqual({
+      kind: "command",
+      icon: false,
+      text: "/compactCompact the thread",
+    })
+    // Hovering a skill's token shows its SKILL.md, when there is one.
+    expect(within(menu).getByText("/user-skill")).toHaveAttribute(
+      "title",
+      USER_SKILL_PATH
+    )
+    expect(within(menu).getByText("/simplify")).not.toHaveAttribute("title")
+  })
+
+  it("keeps every row plain while only some skills are marked", async () => {
+    const menu = await openMenu([
+      {
+        name: "user-skill",
+        description: "User skill probe",
+        skill: true,
+        skill_path: USER_SKILL_PATH,
+      },
+      { name: "simplify", description: "Review the changed code" },
+      { name: "compact", description: "Compact the thread" },
+    ])
+    expect(menu.querySelector("[data-command-kind]")).toBeNull()
+    expect(within(menu).getByText("/user-skill")).not.toHaveAttribute("title")
+    expect(kindOf(menu, "/user-skill").text).toBe("/user-skillUser skill probe")
+  })
+})
+
 // Antigravity's ACP server advertises only its built-ins and never a skill, so
 // the skills it loads reach the `/` menu from disk, after those commands.
 describe("MessageInput slash menu for skills an agent does not advertise", () => {
@@ -1854,6 +1970,27 @@ describe("MessageInput slash menu for skills an agent does not advertise", () =>
     expect(agentSkills).toHaveBeenCalledWith("antigravity", null)
   })
 
+  it("lists custom ACP agents' skills from disk after their commands", async () => {
+    agentSkills.mockReturnValue([DEPLOY, SHADOWED])
+    await mountAndType({
+      agentType: "custom:antigravity-b",
+      availableCommands: COMMANDS,
+    })
+
+    const menu = await screen.findByTestId("slash-menu")
+    const rows = within(menu)
+      .getAllByRole("button")
+      .map((row) => row.textContent)
+    expect(rows).toEqual([
+      expect.stringMatching(/^\/plan/),
+      expect.stringMatching(/^\/logout/),
+      expect.stringMatching(/^\/usage/),
+      "DeployShip the build",
+    ])
+    expect(within(menu).queryByText("Plan skill")).toBeNull()
+    expect(agentSkills).toHaveBeenCalledWith("custom:antigravity-b", null)
+  })
+
   it("inserts a picked Antigravity skill as its `/` token", async () => {
     agentSkills.mockReturnValue([DEPLOY])
     const { editor } = await mountAndType(
@@ -1898,6 +2035,70 @@ describe("MessageInput slash menu for skills an agent does not advertise", () =>
     })
     const menu = await screen.findByTestId("slash-menu")
     expect(within(menu).getByText("Deploy")).toBeInTheDocument()
+  })
+
+  // OpenCode 1.x advertised every skill as a command; 2.x advertises only its
+  // commands, so after the move to 2.x its `/` menu showed just these four
+  // (#1089). Its skills now come from disk, as Antigravity's do.
+  it("lists OpenCode's skills from disk after its commands", async () => {
+    // What opencode 2.2.5 advertises with no MCP prompts or custom commands.
+    const OPENCODE_COMMANDS = [
+      { name: "init", description: "guided AGENTS.md setup" },
+      {
+        name: "review",
+        description:
+          "review changes [commit|branch|pr], defaults to uncommitted",
+      },
+      {
+        name: "goal",
+        description:
+          "keep working until an objective is met [pause|resume|clear]",
+      },
+      { name: "compact", description: "Compact the session" },
+    ]
+    // Sending `/review` runs OpenCode's command, never a skill of that name.
+    const REVIEW_SKILL = { ...SHADOWED, id: "review", name: "Review skill" }
+    agentSkills.mockReturnValue([DEPLOY, REVIEW_SKILL])
+    const { editor } = await mountAndType({
+      agentType: "open_code",
+      availableCommands: OPENCODE_COMMANDS,
+    })
+
+    const menu = await screen.findByTestId("slash-menu")
+    const rows = within(menu)
+      .getAllByRole("button")
+      .map((row) => row.textContent)
+    expect(rows).toEqual([
+      expect.stringMatching(/^\/init/),
+      expect.stringMatching(/^\/review/),
+      expect.stringMatching(/^\/goal/),
+      expect.stringMatching(/^\/compact/),
+      "DeployShip the build",
+    ])
+    expect(within(menu).queryByText("Review skill")).toBeNull()
+    expect(agentSkills).toHaveBeenCalledWith("open_code", null)
+
+    // Picking it inserts the `/` token OpenCode passes to its model as written.
+    act(() => {
+      editor.commands.insertContent("dep")
+    })
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("slash-menu")).getAllByRole("button")
+      ).toHaveLength(1)
+    )
+    act(() => {
+      ;(editor.view.dom as HTMLElement).dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(composerHandle.current?.getText()).toBe("/deploy ")
+    )
   })
 
   it("keeps a `$` typed for Antigravity as plain text", async () => {
@@ -3201,5 +3402,218 @@ describe("MessageInput predicted follow-up prompt", () => {
       expect(composerHandle.current!.isEmpty()).toBe(true)
       unmount()
     }
+  })
+})
+
+// The tab store closes a draft tab only when it holds nothing. What a saved
+// draft cannot show — typing still inside the save debounce, an image
+// attachment (never saved) — the mounted composer reports itself.
+describe("MessageInput live content for draft tidying", () => {
+  const draftKey = "draft:live-content"
+  afterEach(() => {
+    cleanup()
+    composerHandle.current = null
+    clearMessageInputDraftV2(draftKey)
+  })
+
+  function tree(props: Partial<React.ComponentProps<typeof MessageInput>>) {
+    return (
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <MessageInput
+          onSend={vi.fn()}
+          promptCapabilities={CAPS}
+          draftStorageKey={draftKey}
+          {...props}
+        />
+      </NextIntlClientProvider>
+    )
+  }
+
+  it("reports typed text and image attachments until the composer goes", async () => {
+    const view = render(tree({}))
+    await waitFor(
+      () => expect(composerHandle.current?.getEditor()).toBeTruthy(),
+      { timeout: 5000 }
+    )
+    const editor = composerHandle.current!.getEditor()!
+    expect(hasLiveComposerContent(draftKey)).toBe(false)
+
+    act(() => {
+      editor.commands.insertContent("half a thought")
+    })
+    await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(true))
+    act(() => {
+      editor.commands.clearContent(true)
+    })
+    await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(false))
+
+    // An image alone, no text.
+    view.rerender(
+      tree({
+        injectContent: {
+          handBack: [{ type: "image", data: "aGk=", mime_type: "image/png" }],
+        },
+      })
+    )
+    expect(await screen.findByAltText("image.png")).toBeInTheDocument()
+    await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(true))
+
+    view.unmount()
+    expect(hasLiveComposerContent(draftKey)).toBe(false)
+  })
+
+  // A dropped image is read before it shows: from the drop on, the draft
+  // already counts as holding content, not only once the thumbnail commits.
+  it("reports a file intake the moment it starts, before its content commits", async () => {
+    const { container } = render(tree({}))
+    await waitFor(
+      () => expect(composerHandle.current?.getEditor()).toBeTruthy(),
+      { timeout: 5000 }
+    )
+    const host = container.firstElementChild as HTMLElement
+    const image = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", {
+      type: "image/png",
+    })
+    expect(hasLiveComposerContent(draftKey)).toBe(false)
+
+    // Dispatched outside act(): React must not get to commit (and run the
+    // composer's effects) before the assertion, as it would not in a browser.
+    const drop = new Event("drop", { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [image], types: ["Files"], items: [] },
+    })
+    host.dispatchEvent(drop)
+    // Synchronously, with the file still being read.
+    expect(screen.queryByAltText("shot.png")).toBeNull()
+    expect(hasLiveComposerContent(draftKey)).toBe(true)
+
+    expect(await screen.findByAltText("shot.png")).toBeInTheDocument()
+    await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(true))
+  })
+
+  describe("a context-menu paste", () => {
+    let finishRead: ((text: string) => void) | null = null
+    function setClipboard(readText: () => Promise<string>) {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { readText, read: async () => [], writeText: async () => {} },
+      })
+    }
+    async function openPasteItem() {
+      render(tree({}))
+      await waitFor(
+        () => expect(composerHandle.current?.getEditor()).toBeTruthy(),
+        { timeout: 5000 }
+      )
+      const surface = document.querySelector<HTMLElement>(".ProseMirror")!
+      fireEvent.contextMenu(surface, { clientX: 40, clientY: 12 })
+      return screen.findByRole("menuitem", { name: "Paste as plain text" })
+    }
+
+    it("counts as content on its way from the first clipboard read", async () => {
+      setClipboard(
+        () =>
+          new Promise<string>((resolve) => {
+            finishRead = resolve
+          })
+      )
+      const paste = await openPasteItem()
+      fireEvent.click(paste)
+      // The read has not answered yet: nothing in the composer, but it counts.
+      expect(hasLiveComposerContent(draftKey)).toBe(true)
+      // An empty clipboard: nothing lands, and the mark goes with the paste.
+      await act(async () => {
+        finishRead?.("")
+      })
+      await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(false))
+    })
+
+    describe("with files copied in Finder / Explorer", () => {
+      afterEach(() => {
+        attachmentsOverride.current = null
+      })
+
+      // jsdom has no `ClipboardEvent`, which ProseMirror's `pasteText` builds,
+      // so the text paste itself is only observed being asked for.
+      function spyOnTextPaste() {
+        const view = composerHandle.current!.getEditor()!.view
+        return vi.spyOn(view, "pasteText").mockImplementation(() => true)
+      }
+
+      it("attaches the files instead of pasting the names the text API sees", async () => {
+        let attachedFiles = false
+        const appendClipboardFiles = vi.fn(async () => {
+          attachedFiles = true
+          return true
+        })
+        attachmentsOverride.current = { appendClipboardFiles }
+        setClipboard(async () => "bundle.zip")
+        const paste = await openPasteItem()
+        const pasteText = spyOnTextPaste()
+        fireEvent.click(paste)
+        await waitFor(() => expect(attachedFiles).toBe(true))
+        await act(async () => {})
+        expect(pasteText).not.toHaveBeenCalled()
+      })
+
+      it("still pastes the text when the clipboard holds no files", async () => {
+        attachmentsOverride.current = {
+          appendClipboardFiles: vi.fn(async () => false),
+        }
+        setClipboard(async () => "plain words")
+        const paste = await openPasteItem()
+        const pasteText = spyOnTextPaste()
+        fireEvent.click(paste)
+        await waitFor(() =>
+          expect(pasteText).toHaveBeenCalledWith("plain words")
+        )
+      })
+    })
+  })
+
+  // A pasted image the hook drops at once (here an empty one): the intake
+  // starts and settles with nothing, and the mark set at its start goes.
+  it("lets go of an intake that brought nothing", async () => {
+    render(tree({}))
+    await waitFor(
+      () => expect(composerHandle.current?.getEditor()).toBeTruthy(),
+      { timeout: 5000 }
+    )
+    const surface = document.querySelector<HTMLElement>(".ProseMirror")!
+    const empty = new File([], "empty.png", { type: "image/png" })
+    const paste = new Event("paste", { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, "clipboardData", {
+      value: {
+        files: [empty],
+        items: [],
+        types: ["Files"],
+        getData: () => "",
+      },
+    })
+    surface.dispatchEvent(paste)
+    // The intake did start (and marked the draft at once)…
+    expect(hasLiveComposerContent(draftKey)).toBe(true)
+    // …and once it has settled with nothing, the mark goes.
+    await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(false))
+  })
+
+  // Started and settled before React renders (an intake begun outside an
+  // event that finds nothing to do): `intakePending` reads false both times,
+  // so only the revision makes the composer report again — without it, the
+  // mark set at the start would protect a blank draft for good.
+  it("lets go of an intake that started and settled within one render", async () => {
+    render(tree({}))
+    await waitFor(
+      () => expect(composerHandle.current?.getEditor()).toBeTruthy(),
+      { timeout: 5000 }
+    )
+    let markedAtStart = false
+    act(() => {
+      const settle = attachmentsCapture.current!.beginIntake()
+      markedAtStart = hasLiveComposerContent(draftKey)
+      settle()
+    })
+    expect(markedAtStart).toBe(true)
+    await waitFor(() => expect(hasLiveComposerContent(draftKey)).toBe(false))
   })
 })

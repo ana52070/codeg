@@ -1,4 +1,11 @@
-import { memo, useCallback, useMemo, type ReactNode } from "react"
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react"
 import { useTranslations } from "next-intl"
 
 import type { AdaptedContentPart } from "@/lib/adapters/ai-elements-adapter"
@@ -14,9 +21,10 @@ import {
 } from "@/lib/codex-visualize"
 import { normalizeToolName } from "@/lib/tool-call-normalization"
 import { MessageResponse } from "@/components/ai-elements/message"
+import { useChatMotion } from "@/hooks/use-chat-motion"
 import { JsonRenderScope } from "@/components/ai-elements/json-render-pre"
 import { ActivityTimeline } from "./activity/activity-timeline"
-import { CodegMcpToolCard } from "./codeg-mcp-tool-card"
+import type { ActivityFoot } from "./activity/timeline-foot"
 import { CodexVisualizeCard } from "./codex-visualize-card"
 import { CollabAgentCard } from "./collab-agent-card"
 import {
@@ -27,7 +35,6 @@ import { GeneratedImagesBlock } from "./generated-images-block"
 import { HtmlFilePreviews } from "./html-file-previews"
 import { PlainTextWithBadges } from "./plain-text-with-badges"
 import { PlanMarkdownCard } from "./plan-mode-card"
-import { ResumedDelegationCard } from "./resumed-delegation-card"
 import { TurnErrorPart } from "./turn-error-part"
 
 /**
@@ -44,12 +51,15 @@ const TextPart = memo(function TextPart({
   text,
   isUser = false,
   isStreaming = false,
+  live = false,
 }: {
   text: string
   // User messages render as plain text + inline reference badges (no Markdown),
   // matching the plain-text composer. Assistant / system text keeps full Markdown.
   isUser?: boolean
   isStreaming?: boolean
+  /** The prose the agent is writing right now: its words fade in. */
+  live?: boolean
 }) {
   if (isUser) {
     return (
@@ -58,7 +68,7 @@ const TextPart = memo(function TextPart({
       </div>
     )
   }
-  return <AssistantText text={text} isStreaming={isStreaming} />
+  return <AssistantText text={text} isStreaming={isStreaming} live={live} />
 })
 
 /**
@@ -72,9 +82,11 @@ const TextPart = memo(function TextPart({
 function AssistantText({
   text,
   isStreaming,
+  live,
 }: {
   text: string
   isStreaming: boolean
+  live: boolean
 }) {
   const segments = useMemo(
     () => (hasCodexVisualizeRef(text) ? splitCodexVisualizeRefs(text) : null),
@@ -90,7 +102,7 @@ function AssistantText({
 
   const hasInline = segments?.some((s) => s.kind === "visualize") ?? false
   if (!hasInline && mentions.length === 0) {
-    return <MarkdownText text={text} isStreaming={isStreaming} />
+    return <MarkdownText text={text} isStreaming={isStreaming} live={live} />
   }
   return (
     <div className="space-y-2">
@@ -107,32 +119,78 @@ function AssistantText({
               key={`md-${index}`}
               text={segment.text}
               isStreaming={isStreaming}
+              live={live && index === segments.length - 1}
             />
           )
         )
       ) : (
-        <MarkdownText text={text} isStreaming={isStreaming} />
+        <MarkdownText text={text} isStreaming={isStreaming} live={live} />
       )}
       {mentions.length > 0 ? <HtmlFilePreviews paths={mentions} /> : null}
     </div>
   )
 }
 
+/**
+ * How the prose being written arrives: a character at a time, each fading in
+ * (globals.css, `[data-word-fade]`), a chunk's characters one after another so
+ * a burst of text flows in rather than landing at once. By character, not by
+ * word: a run of Chinese or Japanese has no spaces, and as one growing "word"
+ * it would never fade at all. Streamdown wraps each new character in a span
+ * and spaces their delays; the fade itself is ours, a transition from
+ * `@starting-style`, which a later render cannot cut short the way it re-times
+ * Streamdown's own keyframes.
+ */
+const LIVE_TEXT_ANIMATION = { sep: "char", stagger: 8 } as const
+
+/**
+ * Arms the fade a frame after the text mounts, so only characters that arrive
+ * after that fade in. Text that mounts already written — the prose being
+ * written, remounted as it moves onto or off the rail, or brought back by the
+ * virtual list — stays as it is instead of fading in all over again. (A
+ * starting style applies to an element's first style only: the characters
+ * already there were styled before the fade was armed.)
+ */
+function useFadeArmed(fade: boolean): boolean {
+  const [armed, setArmed] = useState(false)
+  const [wasFading, setWasFading] = useState(fade)
+  if (wasFading !== fade) {
+    setWasFading(fade)
+    if (!fade) setArmed(false)
+  }
+  useEffect(() => {
+    if (!fade || armed) return
+    const frame = requestAnimationFrame(() => setArmed(true))
+    return () => cancelAnimationFrame(frame)
+  }, [fade, armed])
+  return fade && armed
+}
+
 function MarkdownText({
   text,
   isStreaming,
+  live = false,
 }: {
   text: string
   isStreaming: boolean
+  live?: boolean
 }) {
+  const motion = useChatMotion()
+  const fade = live && isStreaming && motion
+  const armed = useFadeArmed(fade)
   return (
-    <div className='break-words text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside [&_[data-streamdown="code-block-body"]]:max-h-96 [&_[data-streamdown="code-block-body"]]:overflow-auto'>
+    <div
+      className='break-words text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside [&_[data-streamdown="code-block-body"]]:max-h-96 [&_[data-streamdown="code-block-body"]]:overflow-auto'
+      data-word-fade={armed ? "" : undefined}
+    >
       {/* An assistant reply's own text: the one place a ```spec fence may
           render as a json-render card. */}
       <JsonRenderScope>
         <MessageResponse
           mode={isStreaming ? "streaming" : "static"}
           parseIncompleteMarkdown={isStreaming}
+          animated={fade ? LIVE_TEXT_ANIMATION : undefined}
+          isAnimating={fade}
         >
           {text}
         </MessageResponse>
@@ -168,10 +226,7 @@ type ToolCallPart = Extract<AdaptedContentPart, { type: "tool-call" }>
 /**
  * The tool calls whose own cards the timeline hosts on its rail: codex-acp's
  * context compaction (tagged by `_meta.contextCompaction`, not by name),
- * codex's live collab sub-agent activity, and codeg-mcp's `resume_delegation`
- * (the sub-agent that came back, drawn as the delegation card itself, with
- * the generic workbench card for a refused resume, where there is no sub-agent
- * to draw and only the reason is worth reading).
+ * and codex's live collab sub-agent activity.
  */
 const HostedToolCall = memo(function HostedToolCall({
   part,
@@ -197,32 +252,6 @@ const HostedToolCall = memo(function HostedToolCall({
       />
     )
   }
-  if (toolName === "resume_delegation") {
-    const fallback = (
-      <CodegMcpToolCard
-        tool="resume_delegation"
-        input={part.input ?? null}
-        output={part.output ?? null}
-        errorText={part.errorText ?? null}
-        state={part.state}
-      />
-    )
-    if (!part.toolCallId) return fallback
-    return (
-      <ResumedDelegationCard
-        toolCallId={part.toolCallId}
-        input={part.input ?? null}
-        output={part.output ?? null}
-        errorText={part.errorText ?? null}
-        state={part.state}
-        meta={part.meta ?? null}
-        // Whether a sub-agent resolves is only known inside the card (it takes
-        // a hook to find out), so the fallback goes in rather than the decision
-        // coming out.
-        fallback={fallback}
-      />
-    )
-  }
   return null
 })
 
@@ -243,7 +272,8 @@ function renderPart(
   part: AdaptedContentPart,
   keyId: string,
   role: MessageRole | undefined,
-  isStreaming: boolean
+  isStreaming: boolean,
+  live = false
 ): ReactNode {
   switch (part.type) {
     case "text":
@@ -259,6 +289,7 @@ function renderPart(
           text={part.text}
           isUser={role === "user"}
           isStreaming={isStreaming}
+          live={live}
         />
       )
     case "tool-call":
@@ -288,8 +319,8 @@ function renderPart(
 
 function useAssistantRenderPart(isStreaming: boolean) {
   return useCallback(
-    (part: AdaptedContentPart, key: string) =>
-      renderPart(part, key, "assistant", isStreaming),
+    (part: AdaptedContentPart, key: string, live = false) =>
+      renderPart(part, key, "assistant", isStreaming, live),
     [isStreaming]
   )
 }
@@ -302,16 +333,16 @@ export const ActivityParts = memo(function ActivityParts({
   model,
   isStreaming,
   pinnedOnly = false,
-  working = false,
+  foot,
   headed = false,
 }: {
   model: ActivityModel
   isStreaming: boolean
   /** Only the rows still running (see `ActivityTimeline`). */
   pinnedOnly?: boolean
-  /** The reply ends on its rail while its agent is at work (see
+  /** The capsule the rail ends on, which folds the reply's steps away (see
    *  `ActivityTimeline`). */
-  working?: boolean
+  foot?: ActivityFoot
   /** Hung under the turn's header (see `ActivityTimeline`). */
   headed?: boolean
 }) {
@@ -322,7 +353,7 @@ export const ActivityParts = memo(function ActivityParts({
       isStreaming={isStreaming}
       renderPart={render}
       pinnedOnly={pinnedOnly}
-      working={working}
+      foot={foot}
       headed={headed}
     />
   )
@@ -348,7 +379,15 @@ const AssistantActivity = memo(function AssistantActivity({
         isStreaming={isStreaming}
         renderPart={render}
       />
-      {model.answer.map((part, i) => render(part, `answer-${i}`))}
+      {model.answer.map((part, i) =>
+        // The answer's last part, while the reply is written, is the prose
+        // being written.
+        render(
+          part,
+          `answer-${i}`,
+          isStreaming && i === model.answer.length - 1
+        )
+      )}
     </div>
   )
 })

@@ -80,7 +80,6 @@ function codexAgent(overrides: Partial<AcpAgentInfo> = {}): AcpAgentInfo {
     env: {},
     config_json: null,
     config_file_path: null,
-    opencode_auth_json: null,
     codex_auth_json: API_KEY_AUTH,
     cline_secrets_json: null,
     codex_config_toml: API_KEY_CONFIG,
@@ -172,6 +171,53 @@ describe("AcpAgentSettings — the Codex configuration card", () => {
 
     await user.click(screen.getByRole("switch", WEBSOCKET_SWITCH))
     expect(parseTomlDocument(configTomlEditor().value)).toEqual(original)
+  })
+
+  // codex refuses to load a config carrying `approval_policy = "untrusted"`
+  // (0.160 and 0.164 alike), so the panel names the value it found, says it has
+  // to go, and never offers it.
+  it("flags a retired untrusted approval policy and never offers it", async () => {
+    const user = userEvent.setup()
+    await openPanel(
+      codexAgent({
+        codex_config_toml: `approval_policy = "untrusted"\n${API_KEY_CONFIG}`,
+        codex_sandbox_settings: {
+          approval_policy: "untrusted",
+          granular: null,
+          sandbox_mode: null,
+          workspace_write: {
+            writable_roots: [],
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+          },
+          shadowed_by_default_permissions: false,
+          has_permissions_table: false,
+        },
+      })
+    )
+    const retired =
+      enMessages.AcpAgentSettings.codex.approvalPolicyUntrustedRetired
+    expect(screen.getByText(retired)).toBeInTheDocument()
+
+    const label = screen.getByText("Approval policy", { selector: "label" })
+    const trigger = within(label.parentElement as HTMLElement).getByRole(
+      "combobox"
+    )
+    expect(trigger).toHaveTextContent(
+      enMessages.AcpAgentSettings.codex.approvalPolicy_untrusted
+    )
+    await user.click(trigger)
+    const untrusted = await screen.findByRole("option", {
+      name: enMessages.AcpAgentSettings.codex.approvalPolicy_untrusted,
+    })
+    expect(untrusted).toHaveAttribute("aria-disabled", "true")
+    await user.click(
+      screen.getByRole("option", {
+        name: enMessages.AcpAgentSettings.codex["approvalPolicy_on-request"],
+      })
+    )
+    expect(screen.queryByText(retired)).toBeNull()
   })
 
   // codex keeps its built-in providers whatever config.toml says about them.

@@ -54,7 +54,6 @@ function commandCodeAgent(overrides: Partial<AcpAgentInfo> = {}): AcpAgentInfo {
     env: {},
     config_json: null,
     config_file_path: null,
-    opencode_auth_json: null,
     codex_auth_json: null,
     cline_secrets_json: null,
     codex_config_toml: null,
@@ -126,9 +125,13 @@ describe("AcpAgentSettings — the Command Code panel", () => {
       OTHER: "keep",
     })
 
-    await user.click(
-      screen.getByRole("switch", { name: "Command Code enable switch" })
-    )
+    // The switch stays locked until the save lands; a click before then is
+    // dropped.
+    const toggle = screen.getByRole("switch", {
+      name: "Command Code enable switch",
+    })
+    await waitFor(() => expect(toggle).toBeEnabled())
+    await user.click(toggle)
     await waitFor(() => expect(acpUpdateAgentEnv).toHaveBeenCalledTimes(2))
     const [, toggled] = vi.mocked(acpUpdateAgentEnv).mock.calls[1]
     expect(toggled.enabled).toBe(false)

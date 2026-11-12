@@ -15,6 +15,7 @@
 
 pub mod acp;
 pub mod acp_transcript;
+pub mod agent_turn_files;
 pub use acp::{
     idle_sweep_task, idle_timeout_from_env, lifecycle_subscriber_task, SWEEP_INTERVAL_SECS,
 };
@@ -594,6 +595,11 @@ mod tauri_app {
         // flush on a graceful exit.
         let _log_guard = crate::logging::init::init_desktop();
 
+        // macOS must not pause the process every agent session runs through
+        // when memory runs out (see the function).
+        #[cfg(target_os = "macos")]
+        process::opt_out_of_low_swap_suspension();
+
         if let Err(err) = fix_path_env::fix() {
             tracing::error!("[PATH] fix_path_env failed: {err}");
         }
@@ -1047,6 +1053,16 @@ mod tauri_app {
                         )
                         .await;
                     });
+                }
+
+                // Keeps the Codex model list codeg published current (a provider
+                // list past its age, a codex upgraded outside codeg) and clears
+                // what a release left behind. One per process; mirrored in
+                // `bin/codeg_server.rs`.
+                if let Some(scheduler) = crate::acp::codex_catalog_refresh::build(
+                    web::event_bridge::EventEmitter::Tauri(app.handle().clone()),
+                ) {
+                    tauri::async_runtime::spawn(crate::acp::codex_catalog_refresh::run(scheduler));
                 }
 
                 // Label worktree folders registered before aliases were seeded at
@@ -2119,6 +2135,7 @@ mod tauri_app {
                 version_control::validate_github_token,
                 version_control::validate_gitlab_token,
                 version_control::validate_gitea_token,
+                version_control::validate_cnb_token,
                 version_control::update_github_accounts,
                 version_control::save_account_token,
                 version_control::get_account_token,
@@ -2162,8 +2179,8 @@ mod tauri_app {
                 acp_commands::acp_update_agent_env,
                 acp_commands::acp_update_agent_config,
                 acp_commands::acp_update_hermes_config,
+                acp_commands::acp_update_claude_model_picker,
                 acp_commands::acp_update_kimi_code_config,
-                acp_commands::acp_fetch_kimi_models,
                 deepseek_settings_commands::acp_load_deepseek_model_catalog,
                 deepseek_settings_commands::acp_update_deepseek_model_catalog,
                 acp_commands::acp_update_pi_config,
@@ -2191,14 +2208,24 @@ mod tauri_app {
                 crate::commands::custom_agents::acp_add_registry_agent,
                 crate::commands::custom_agents::acp_current_platform,
                 acp_commands::acp_list_agent_skills,
+                acp_commands::acp_list_agent_runtime_skills,
                 acp_commands::acp_read_agent_skill,
                 acp_commands::acp_save_agent_skill,
                 acp_commands::acp_delete_agent_skill,
                 acp_commands::opencode_list_plugins,
                 acp_commands::opencode_provider_catalog,
                 acp_commands::codex_bundled_catalog,
-                acp_commands::opencode_install_plugins,
-                acp_commands::opencode_uninstall_plugin,
+                crate::commands::opencode_credentials::opencode_list_integrations,
+                crate::commands::opencode_credentials::opencode_connect_key,
+                crate::commands::opencode_credentials::opencode_disconnect_provider,
+                crate::commands::codex_catalog::codex_catalog_plan_preview,
+                crate::commands::codex_catalog::codex_fetch_endpoint_catalog,
+                crate::commands::codex_catalog::codex_endpoint_catalog_published,
+                crate::commands::codex_catalog::codex_endpoint_catalog_cached,
+                crate::commands::codex_catalog::codex_endpoint_catalog_status,
+                crate::commands::codex_catalog::codex_refresh_endpoint_catalog,
+                acp_commands::opencode_add_plugin,
+                acp_commands::opencode_remove_plugin,
                 acp_commands::codex_request_device_code,
                 acp_commands::codex_poll_device_code,
                 experts_commands::experts_list,
@@ -2307,6 +2334,7 @@ mod tauri_app {
                 work_task_commands::work_task_template_delete,
                 forge_commands::folder_forge_remote,
                 forge_commands::forge_list_issues,
+                forge_commands::forge_issue_detail,
                 forge_commands::forge_tab_count,
                 forge_commands::forge_list_labels,
                 forge_commands::forge_list_comments,
@@ -2319,6 +2347,7 @@ mod tauri_app {
                 forge_commands::forge_merge_options,
                 forge_commands::forge_merge_change,
                 forge_commands::work_task_create_from_forge,
+                forge_commands::work_task_create_from_forge_issues,
                 forge_commands::work_task_lookup_by_source,
                 forge_commands::forge_settings_get,
                 forge_commands::forge_settings_set,
@@ -2343,7 +2372,9 @@ mod tauri_app {
                 notification::open_system_notification_settings,
                 file_io::save_binary_file,
                 file_io::save_text_file,
+                file_io::save_pasted_attachment,
                 clipboard_commands::copy_files_to_clipboard,
+                clipboard_commands::read_clipboard_files,
                 config_sync::config_sync_export_file,
                 config_sync::config_sync_peek_file,
                 config_sync::config_sync_import_file,
@@ -2387,6 +2418,8 @@ mod tauri_app {
                 chat_channel_commands::set_chat_event_filter,
                 chat_channel_commands::get_chat_event_webhooks,
                 chat_channel_commands::set_chat_event_webhooks,
+                chat_channel_commands::get_chat_event_top_level_only,
+                chat_channel_commands::set_chat_event_top_level_only,
                 chat_channel_commands::get_chat_message_language,
                 chat_channel_commands::set_chat_message_language,
                 chat_channel_commands::weixin_get_qrcode,
@@ -2395,6 +2428,7 @@ mod tauri_app {
                 model_provider_commands::create_model_provider,
                 model_provider_commands::update_model_provider,
                 model_provider_commands::delete_model_provider,
+                model_provider_commands::list_provider_models,
                 web::start_web_server,
                 web::stop_web_server,
                 web::get_web_server_status,

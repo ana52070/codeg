@@ -2256,6 +2256,44 @@ impl DelegationBroker {
             .await
     }
 
+    /// One-line summaries of the keyed pending entries still unclaimed on
+    /// this parent, for the synthetic-fallback WARN: a budget expiry with
+    /// keyed entries present means their keys disagree with the request's key
+    /// (an ACP-side parse that doesn't match what the MCP call actually
+    /// carries), and the summaries make that mismatch visible in the log
+    /// without a reproducer. Keyed entries are never FIFO-claimed, so they
+    /// persist here until their own round-trip, a terminal tombstone, or
+    /// teardown.
+    pub(crate) async fn unmatched_pending_key_summaries(
+        &self,
+        parent_connection_id: &str,
+    ) -> Vec<String> {
+        let map = self.tool_calls.inner.lock().await;
+        let Some(bucket) = map.get(parent_connection_id) else {
+            return Vec::new();
+        };
+        bucket
+            .pending
+            .iter()
+            .filter_map(|p| {
+                let key = p.match_key.as_ref()?;
+                let task_preview: String = key.task.chars().take(80).collect();
+                let dir_preview: String = key
+                    .working_dir
+                    .as_deref()
+                    .unwrap_or("-")
+                    .chars()
+                    .take(120)
+                    .collect();
+                Some(format!(
+                    "id={} target={target:?} task={task_preview:?} dir={dir_preview}",
+                    p.tool_call_id,
+                    target = key.target,
+                ))
+            })
+            .collect()
+    }
+
     /// Remove `handle` from the pre-cancel set, returning whether it was
     /// present. Used by `handle_request` at two checkpoints (entry + just
     /// after pending registration) so a cancel that lost the race with the
@@ -2519,13 +2557,27 @@ impl DelegationBroker {
                 .claim_pending_tool_call_with_brief_wait(&req.parent_connection_id, &match_key)
                 .await;
             let claimed_identityless = matches!(claimed, Some((_, true)));
-            req.parent_tool_use_id = claimed.map(|(id, _)| id).unwrap_or_else(|| {
-                tracing::warn!(
-                    "[delegation] synthetic fallback for parent_tool_use_id on conn={} (no ACP tool_call_id arrived within claim budget)",
-                    req.parent_connection_id
-                );
-                format!("delegation-{}", uuid::Uuid::new_v4())
-            });
+            req.parent_tool_use_id = match claimed {
+                Some((id, _)) => id,
+                None => {
+                    let unmatched = self
+                        .unmatched_pending_key_summaries(&req.parent_connection_id)
+                        .await;
+                    if unmatched.is_empty() {
+                        tracing::warn!(
+                            "[delegation] synthetic fallback for parent_tool_use_id on conn={} (no ACP tool_call_id arrived within claim budget)",
+                            req.parent_connection_id
+                        );
+                    } else {
+                        tracing::warn!(
+                            "[delegation] synthetic fallback for parent_tool_use_id on conn={} (no ACP tool_call_id arrived within claim budget); unmatched keyed pending entries remain: {}",
+                            req.parent_connection_id,
+                            unmatched.join(" | ")
+                        );
+                    }
+                    format!("delegation-{}", uuid::Uuid::new_v4())
+                }
+            };
             // The claimed announcement never carried an identity (Cursor's
             // "MCP: tool" + "{}" — the wire will not re-send title/arguments):
             // restore it NOW, before the multi-second spawn, so the live card
@@ -3251,7 +3303,8 @@ impl DelegationBroker {
     /// Mirror of `emit_completed_if_real`: same synthetic-id skip, and the
     /// event rides the parent's stream so the frontend `DelegationContext`
     /// receives it via the parent's per-connection attach stream in
-    /// web/server mode (not only via the desktop firehose).
+    /// web/server mode (not only via the desktop firehose). The lifecycle
+    /// `DelegationChildRunning` goes out first, for every delegation.
     #[allow(clippy::too_many_arguments)]
     async fn emit_started_if_real(
         &self,
@@ -3264,6 +3317,10 @@ impl DelegationBroker {
         task_preview: &str,
         task_id: &str,
     ) {
+        // Every delegation counts for the parent's lifecycle, card or not.
+        self.event_emitter
+            .emit_child_running(parent_connection_id, child_connection_id, true)
+            .await;
         if is_synthetic_parent_tool_use_id(parent_tool_use_id) {
             return;
         }
@@ -3285,7 +3342,9 @@ impl DelegationBroker {
     /// stream iff the `parent_tool_use_id` refers to a real ACP tool_call.
     /// Synthetic ids (the `"delegation-<uuid>"` UUID fallback) map to no
     /// live UI binding, so the emit would be wasted noise — same skip
-    /// criterion as `write_meta_if_real`.
+    /// criterion as `write_meta_if_real`. The lifecycle
+    /// `DelegationChildRunning` is not skipped: the parent still has to know
+    /// the child is done.
     #[allow(clippy::too_many_arguments)]
     async fn emit_completed_if_real(
         &self,
@@ -3297,6 +3356,9 @@ impl DelegationBroker {
         assistant: Option<&AssistantRef>,
         result: DelegationResultSummary,
     ) {
+        self.event_emitter
+            .emit_child_running(parent_connection_id, child_connection_id, false)
+            .await;
         if is_synthetic_parent_tool_use_id(parent_tool_use_id) {
             return;
         }
@@ -8792,6 +8854,60 @@ mod tests {
         assert_eq!(emitter.count().await, 1);
     }
 
+    /// A delegation whose parent tool call couldn't be identified has no card,
+    /// so its started/completed events are skipped — but it still dies with its
+    /// parent (`cancel_by_parent`), so the parent's lifecycle accounting must
+    /// hear about it from start to finish.
+    #[tokio::test]
+    async fn child_running_is_reported_for_a_synthetic_parent_tool_use_id() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-synth-life".into())).await;
+        mock.queue_send(Ok(9)).await;
+        let writer = Arc::new(MockMetaWriter::new());
+        let emitter = Arc::new(MockEventEmitter::new());
+        let broker = broker_with_emitter(mock.clone(), writer.clone(), emitter.clone()).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "")).await })
+        };
+        let call_id = loop {
+            if let Some(id) = broker.peek_first_pending_call_id().await {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(
+            emitter.child_running_snapshot().await,
+            vec![("parent-conn".to_string(), "c-synth-life".to_string(), true)],
+            "the running child is reported while it runs"
+        );
+        broker
+            .complete_call(
+                &call_id,
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: "ok".into(),
+                    child_conversation_id: 9,
+                    child_agent_type: AgentType::Codex,
+                    turn_count: 1,
+                    duration_ms: 5,
+                    token_usage: None,
+                }),
+            )
+            .await;
+        driver.await.unwrap();
+
+        assert_eq!(
+            emitter.child_running_snapshot().await,
+            vec![
+                ("parent-conn".to_string(), "c-synth-life".to_string(), true),
+                ("parent-conn".to_string(), "c-synth-life".to_string(), false),
+            ]
+        );
+        assert_eq!(emitter.started_count().await, 0, "no card event");
+        assert_eq!(emitter.count().await, 0, "no card event");
+    }
+
     #[tokio::test]
     async fn emitter_skips_started_for_synthetic_parent_tool_use_id() {
         let mock = Arc::new(MockSpawner::new());
@@ -9361,18 +9477,35 @@ mod tests {
 
         // Per-connection stream (WS attach delivery path) must receive the
         // envelope tagged with the right connection + payload shape.
-        // The parent stream now also carries the setup-time DelegationStarted;
-        // skip past it to the terminal DelegationCompleted.
+        // The parent stream now also carries the setup-time DelegationStarted
+        // and the lifecycle DelegationChildRunning frames; skip past them to
+        // the terminal DelegationCompleted, noting the lifecycle frames.
+        let mut lifecycle = Vec::new();
         let envelope = loop {
             let env = tokio::time::timeout(Duration::from_millis(500), stream_rx.recv())
                 .await
                 .expect("per-connection stream should receive DelegationCompleted within 500ms")
                 .expect("envelope recv must not error");
-            if matches!(env.payload, AcpEvent::DelegationStarted { .. }) {
-                continue;
+            match &env.payload {
+                AcpEvent::DelegationStarted { .. } => continue,
+                AcpEvent::DelegationChildRunning {
+                    child_connection_id,
+                    running,
+                } => {
+                    lifecycle.push((child_connection_id.clone(), *running));
+                    continue;
+                }
+                _ => break env,
             }
-            break env;
         };
+        assert_eq!(
+            lifecycle,
+            vec![
+                ("child-conn-real".to_string(), true),
+                ("child-conn-real".to_string(), false),
+            ],
+            "the parent hears the child start and stop before the card settles"
+        );
         assert_eq!(envelope.connection_id, "parent-conn");
         match &envelope.payload {
             AcpEvent::DelegationCompleted {
@@ -9403,7 +9536,10 @@ mod tests {
                 .await
                 .expect("InternalEventBus should receive DelegationCompleted within 500ms")
                 .expect("bus recv must not error");
-            if matches!(env.payload, AcpEvent::DelegationStarted { .. }) {
+            if matches!(
+                env.payload,
+                AcpEvent::DelegationStarted { .. } | AcpEvent::DelegationChildRunning { .. }
+            ) {
                 continue;
             }
             break env;
@@ -9475,6 +9611,21 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
+        // The lifecycle frame goes out first, for every delegation.
+        let lifecycle = tokio::time::timeout(Duration::from_millis(500), stream_rx.recv())
+            .await
+            .expect("per-connection stream should receive DelegationChildRunning within 500ms")
+            .expect("envelope recv must not error");
+        assert_eq!(lifecycle.connection_id, "parent-conn");
+        assert!(
+            matches!(
+                &lifecycle.payload,
+                AcpEvent::DelegationChildRunning { child_connection_id, running: true }
+                    if child_connection_id == "child-conn-started"
+            ),
+            "expected the child's running frame, got {:?}",
+            lifecycle.payload
+        );
         let envelope = tokio::time::timeout(Duration::from_millis(500), stream_rx.recv())
             .await
             .expect("per-connection stream should receive DelegationStarted within 500ms")
@@ -9504,10 +9655,16 @@ mod tests {
             other => panic!("expected DelegationStarted, got {other:?}"),
         }
 
-        let bus_envelope = tokio::time::timeout(Duration::from_millis(500), bus_rx.recv())
-            .await
-            .expect("InternalEventBus should receive DelegationStarted within 500ms")
-            .expect("bus recv must not error");
+        let bus_envelope = loop {
+            let env = tokio::time::timeout(Duration::from_millis(500), bus_rx.recv())
+                .await
+                .expect("InternalEventBus should receive DelegationStarted within 500ms")
+                .expect("bus recv must not error");
+            if matches!(env.payload, AcpEvent::DelegationChildRunning { .. }) {
+                continue;
+            }
+            break env;
+        };
         assert_eq!(bus_envelope.connection_id, "parent-conn");
         assert!(matches!(
             bus_envelope.payload,

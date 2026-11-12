@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   detectHeredoc,
+  exitFromMeta,
+  extractAgentReportedExit,
   extractCommandExit,
   extractDisplayCommandFromToolInput,
   extractWallTimeMs,
@@ -133,6 +135,56 @@ describe("extractCommandExit", () => {
     ).toBeNull()
     expect(extractCommandExit("")).toBeNull()
     expect(extractCommandExit(null)).toBeNull()
+  })
+
+  // OpenCode 2 closes a command's result with a notice block of its own
+  // (packages/core/src/shell/result.ts `notice`): the live 2.2.0 completion
+  // joins its blocks, history keeps them apart — the last line reads alike.
+  it("reads OpenCode 2's closing exit notice", () => {
+    const live =
+      "ls: /definitely-not-here: No such file or directory\n\nExited with code 1"
+    expect(extractCommandExit(live)).toEqual({ code: 1, signal: null })
+    expect(extractAgentReportedExit(live)).toEqual({ code: 1, signal: null })
+    expect(extractAgentReportedExit("out\n\nKilled by SIGTERM")).toEqual({
+      code: null,
+      signal: "SIGTERM",
+    })
+    expect(
+      extractAgentReportedExit("Exited with code 3\nstill printing")
+    ).toBeNull()
+    expect(extractAgentReportedExit("Timed out before completion")).toBeNull()
+  })
+
+  // 2.2.7 rewords the notice (#62141): `Exit code: N`, a signal as `Exit
+  // code: 143 (SIGTERM)`. The numeric code rides the call's `_meta`; only the
+  // signal has to come from the text.
+  it("reads OpenCode 2.2.7's signal notice", () => {
+    expect(extractAgentReportedExit("out\n\nExit code: 143 (SIGTERM)")).toEqual(
+      { code: null, signal: "SIGTERM" }
+    )
+    expect(
+      extractAgentReportedExit(
+        "Command timed out after 1 seconds. If it needs longer and isn't waiting for input, rerun with a larger timeout.\nExit code: 137 (SIGKILL)"
+      )
+    ).toEqual({ code: null, signal: "SIGKILL" })
+    // Plain codes look like Claude Code's framing: a succeeded call's own
+    // text, never read as the agent's status.
+    expect(extractAgentReportedExit("out\n\nExit code: 3")).toBeNull()
+    expect(extractAgentReportedExit("Exit code: unknown")).toBeNull()
+    expect(
+      extractAgentReportedExit("Exit code: 143 (SIGTERM)\nstill printing")
+    ).toBeNull()
+  })
+})
+
+describe("exitFromMeta", () => {
+  it("reads the exit code a live call carries on its meta", () => {
+    expect(exitFromMeta({ "codeg.exitCode": 2 })).toEqual({
+      code: 2,
+      signal: null,
+    })
+    expect(exitFromMeta({ "codeg.exitCode": "2" })).toBeNull()
+    expect(exitFromMeta(null)).toBeNull()
   })
 })
 

@@ -785,17 +785,26 @@ pub async fn scan_importable_sessions_core(
     )
     .await;
 
-    scan_importable_sessions_from_summaries(conn, emitter, chat_channel_manager, summaries).await
+    scan_importable_sessions_from_summaries(
+        conn,
+        emitter,
+        chat_channel_manager,
+        summaries,
+        &crate::paths::codeg_acp_transcripts_root(),
+    )
+    .await
 }
 
 /// Reconcile summaries already collected by the filesystem scan. Keeping this
 /// boundary separate makes the DB refresh and notification behavior testable
-/// without reading the developer's real agent session directories.
+/// without reading the developer's real agent session directories — or codeg's
+/// own ACP transcripts, read from `transcripts_root`.
 async fn scan_importable_sessions_from_summaries(
     conn: &sea_orm::DatabaseConnection,
     emitter: &EventEmitter,
     chat_channel_manager: &crate::chat_channel::manager::ChatChannelManager,
     summaries: Vec<(AgentType, ConversationSummary)>,
+    transcripts_root: &std::path::Path,
 ) -> Result<ScanResult, AppCommandError> {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -815,6 +824,13 @@ async fn scan_importable_sessions_from_summaries(
             .entry((row.agent_type.clone(), external_id))
             .or_insert(live);
         *entry = *entry || live;
+    }
+    // The Claude Code sessions other conversations already count are in codeg
+    // already, and the import skips them (see
+    // `import_service::claude_sessions_counted_in`).
+    let claude = agent_type_db_str(&AgentType::ClaudeCode);
+    for session in import_service::claude_sessions_counted_in(&conv_rows, transcripts_root) {
+        imported_index.insert((claude.clone(), session), true);
     }
 
     // Refresh the already-imported rows in place before answering, then
@@ -846,12 +862,14 @@ pub async fn scan_importable_sessions(
 
 /// Batch-import the selected sessions, creating (or reopening) each target
 /// folder as needed. Test seam for [`import_selected_sessions_core`]: takes the
-/// scanned summaries as input instead of walking the filesystem.
+/// scanned summaries as input instead of walking the filesystem, and reads
+/// codeg's own ACP transcripts from `transcripts_root`.
 pub(crate) async fn import_selected_from_summaries(
     conn: &sea_orm::DatabaseConnection,
     emitter: &EventEmitter,
     summaries: Vec<(AgentType, ConversationSummary)>,
     selections: Vec<SelectedSessionKey>,
+    transcripts_root: &std::path::Path,
 ) -> Result<ImportSelectedResult, AppCommandError> {
     const MAX_ERRORS: usize = 10;
 
@@ -894,6 +912,10 @@ pub(crate) async fn import_selected_from_summaries(
 
     let folder_rows = load_folder_rows(conn).await?;
     let folder_index = index_folder_rows(&folder_rows);
+    let counted_elsewhere =
+        import_service::claude_sessions_counted_elsewhere(conn, transcripts_root)
+            .await
+            .map_err(AppCommandError::from)?;
 
     let mut result = ImportSelectedResult {
         imported: 0,
@@ -1070,6 +1092,7 @@ pub(crate) async fn import_selected_from_summaries(
                         folder_id,
                         &items,
                         import_service::DeletedPolicy::Restore,
+                        &counted_elsewhere,
                     )
                     .await;
                 result.imported += tally.imported;
@@ -1153,7 +1176,14 @@ pub async fn import_selected_sessions_core(
 
     let envs = agent_setting_service::load_agent_envs(conn).await;
     let summaries = import_service::collect_local_summaries(&envs, |_, _, _, _| {}).await;
-    import_selected_from_summaries(conn, emitter, summaries, selections).await
+    import_selected_from_summaries(
+        conn,
+        emitter,
+        summaries,
+        selections,
+        &crate::paths::codeg_acp_transcripts_root(),
+    )
+    .await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -1349,6 +1379,13 @@ fn parse_resume_task_id(input: &str) -> Option<String> {
 /// an earlier turn). Without this the resumed card would be frozen at the
 /// `running` its ack reported, forever — the child's real outcome landed on the
 /// DB row, not on the resume result.
+///
+/// Any OTHER tool block whose title+args pass [`crate::acp::lifecycle::is_delegation_invocation`]
+/// binds by `tool_use_id` exactly like `delegate_to_agent`. This is what covers
+/// opencode 2.x code mode: the host wraps the MCP call in its `execute` tool, so
+/// the persisted block's title is `execute` and the real invocation lives inside
+/// a JS `code` string. The live path registers those calls through the same
+/// predicate, so replay recognition cannot drift from it.
 fn inject_delegation_meta(turns: &mut [MessageTurn], children: &[DbConversationSummary]) {
     if children.is_empty() {
         return;
@@ -1414,6 +1451,20 @@ fn inject_delegation_meta(turns: &mut [MessageTurn], children: &[DbConversationS
                         .as_deref()
                         .and_then(parse_resume_task_id)
                         .and_then(|task_id| by_task_id.get(task_id.as_str()).copied())
+                } else if crate::acp::lifecycle::is_delegation_invocation(
+                    tool_name,
+                    input_preview.as_deref(),
+                ) {
+                    tool_use_id.as_deref().and_then(|tu| {
+                        by_parent_tool_use_id
+                            .get(tu)
+                            .or_else(|| {
+                                task_id_by_call
+                                    .get(tu)
+                                    .and_then(|task_id| by_task_id.get(task_id.as_str()))
+                            })
+                            .copied()
+                    })
                 } else {
                     continue;
                 };
@@ -2892,12 +2943,14 @@ pub async fn cleanup_chat_folder_for_deleted_conversation(
 
 /// Full conversation-delete orchestration shared by the Tauri command and the web
 /// handler: capture the backing folder BEFORE the soft-delete (so a hidden chat
-/// folder can be retired afterward), soft-delete, broadcast the deletion, then run
-/// the tab + chat-folder cleanups. The thin `delete_conversation_core` primitive
-/// stays event-free for internal/test callers, so the orchestration lives here.
+/// folder can be retired afterward), soft-delete, end the agent working on the
+/// conversation, broadcast the deletion, then run the tab + chat-folder cleanups.
+/// The thin `delete_conversation_core` primitive stays event-free for
+/// internal/test callers, so the orchestration lives here.
 pub async fn delete_conversation_with_cleanup_core(
     emitter: &EventEmitter,
     conn: &sea_orm::DatabaseConnection,
+    manager: &crate::acp::manager::ConnectionManager,
     conversation_id: i32,
 ) -> Result<(), AppCommandError> {
     // Capture the backing folder AND parent before the soft-delete: a hidden
@@ -2910,6 +2963,11 @@ pub async fn delete_conversation_with_cleanup_core(
     let folder_id = pre.as_ref().map(|c| c.folder_id);
     let parent_id = pre.as_ref().and_then(|c| c.parent_id);
     delete_conversation_core(conn, conversation_id).await?;
+    // Deleting is the explicit stop. Closing the conversation's tabs (the
+    // cleanups below, and every client's own close) does not stop anything
+    // that still has work in flight, so without this a background task or a
+    // Remote Control session would run on for a conversation nobody can open.
+    manager.disconnect_by_conversation_id(conversation_id).await;
     emit_conversation_deleted(emitter, conversation_id);
     // A removed delegation child drops its parent's child_count (→ 0 hides the
     // chevron). Re-emit the parent from the authoritative aggregate so every
@@ -2934,10 +2992,11 @@ pub async fn delete_conversation_with_cleanup_core(
 pub async fn delete_conversation(
     app: tauri::AppHandle,
     db: tauri::State<'_, AppDatabase>,
+    manager: tauri::State<'_, crate::acp::manager::ConnectionManager>,
     conversation_id: i32,
 ) -> Result<(), AppCommandError> {
     let emitter = EventEmitter::Tauri(app);
-    delete_conversation_with_cleanup_core(&emitter, &db.conn, conversation_id).await
+    delete_conversation_with_cleanup_core(&emitter, &db.conn, &manager, conversation_id).await
 }
 
 fn compute_stats(all_conversations: &[ConversationSummary]) -> AgentStats {
@@ -3571,6 +3630,86 @@ mod tests {
         );
     }
 
+    /// opencode 2.x wraps the MCP call in its `execute` tool — the persisted
+    /// block's title is `execute` and the real invocation lives in a JS `code`
+    /// string. Replay binds it by the same predicate the live path registers
+    /// with, so a refreshed card keeps its status mapping and 查看会话.
+    #[test]
+    fn inject_delegation_meta_binds_an_opencode_execute_call() {
+        let code = r#"await tools["codeg-mcp"].delegate_to_agent({ agent_type: "codex", task: `t` })"#;
+        let mut turns = vec![tool_use_turn_with_input(
+            Some("tu-exec-1"),
+            "execute",
+            Some(&serde_json::json!({ "code": code }).to_string()),
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "tu-exec-1", "completed")]);
+        let inner = first_block_meta(&turns[0])
+            .and_then(|m| m.get("codeg.delegation").cloned())
+            .expect("execute card should be bound");
+        assert_eq!(inner["status"], "completed");
+        assert_eq!(inner["child_conversation_id"], 42);
+        assert_eq!(inner["agent_type"], "codex");
+    }
+
+    /// The binding fallback is the shared closure, not the tool-name branch:
+    /// an `execute` block whose tool_use_id never meets the child row still
+    /// binds through the task id echoed on its own result.
+    #[test]
+    fn inject_delegation_meta_binds_an_execute_call_by_its_task_id() {
+        let code = r#"tools["codeg-mcp"].delegate_to_agent({ agent_type: "zcode", task: `t` })"#;
+        let mut turns = vec![
+            tool_use_turn_with_input(
+                Some("call_exec_2"),
+                "execute",
+                Some(&serde_json::json!({ "code": code }).to_string()),
+            ),
+            tool_result_turn(
+                "call_exec_2",
+                "Delegation successful. task_id=8ff4c14c-740c-4482-b758-8f2091f97063.",
+            ),
+        ];
+        let mut child = summary_child(7, "exec-unmatched-id", "completed");
+        child.delegation_call_id = Some("8ff4c14c-740c-4482-b758-8f2091f97063".into());
+
+        inject_delegation_meta(&mut turns, &[child]);
+
+        let inner = first_block_meta(&turns[0])
+            .and_then(|m| m.get("codeg.delegation").cloned())
+            .expect("execute card should bind via task id");
+        assert_eq!(inner["child_conversation_id"], 7);
+    }
+
+    /// The code-mode shape counts only on opencode's `execute` tool: another
+    /// tool's `code` argument shaped like the call stays unbound, as it never
+    /// registered live.
+    #[test]
+    fn inject_delegation_meta_does_not_bind_another_tools_code_argument() {
+        let code = r#"await tools["codeg-mcp"].delegate_to_agent({ agent_type: "codex", task: `t` })"#;
+        let mut turns = vec![tool_use_turn_with_input(
+            Some("browser-1"),
+            "mcp__playwright__browser_run_code",
+            Some(&serde_json::json!({ "code": code }).to_string()),
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "browser-1", "completed")]);
+        assert!(first_block_meta(&turns[0]).is_none());
+    }
+
+    /// The shape gate cuts both ways: an `execute` block whose code is not a
+    /// delegation must stay unbound.
+    #[test]
+    fn inject_delegation_meta_does_not_bind_an_unrelated_execute_call() {
+        let mut turns = vec![tool_use_turn_with_input(
+            Some("tu-exec-3"),
+            "execute",
+            Some(r#"{"code":"const x = 1"}"#),
+        )];
+        inject_delegation_meta(&mut turns, &[summary_child(42, "tu-exec-3", "completed")]);
+        assert!(
+            first_block_meta(&turns[0]).is_none(),
+            "a non-delegation execute call must not be bound"
+        );
+    }
+
     /// A reloaded card of an assistant delegation draws the assistant from the
     /// child row: its id, and its name as the task started.
     #[test]
@@ -4125,6 +4264,55 @@ mod tests {
             .filter(|e| e.path().is_dir())
             .count();
         assert_eq!(count, 1, "no duplicate scratch dir created");
+    }
+
+    /// Deleting a conversation ends the agent working on it. A view's teardown
+    /// no longer does that for it: closing a tab spares a connection that still
+    /// has work in flight (a background task, Remote Control), and a deleted
+    /// conversation can never be opened again to stop that work.
+    #[tokio::test]
+    async fn deleting_a_conversation_ends_the_connections_bound_to_it() {
+        use crate::acp::manager::ConnectionManager;
+
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let res =
+            create_chat_conversation_core(&db.conn, data_dir.path(), AgentType::Codex, None, None)
+                .await
+                .expect("create");
+        let manager = ConnectionManager::new();
+        for (id, conversation_id) in [
+            ("bound", Some(res.conversation_id)),
+            ("another-conversation", Some(res.conversation_id + 1)),
+            ("unbound", None),
+        ] {
+            manager
+                .insert_test_connection(id, AgentType::Codex, None, EventEmitter::Noop)
+                .await;
+            manager
+                .get_state(id)
+                .await
+                .expect("inserted")
+                .write()
+                .await
+                .conversation_id = conversation_id;
+        }
+
+        delete_conversation_with_cleanup_core(
+            &EventEmitter::Noop,
+            &db.conn,
+            &manager,
+            res.conversation_id,
+        )
+        .await
+        .expect("delete");
+
+        assert!(
+            manager.get_state("bound").await.is_none(),
+            "the deleted conversation's agent is torn down"
+        );
+        assert!(manager.get_state("another-conversation").await.is_some());
+        assert!(manager.get_state("unbound").await.is_some());
     }
 
     #[tokio::test]
@@ -4857,6 +5045,7 @@ mod tests {
             &emitter,
             &chat_channel_manager,
             vec![summary],
+            no_transcripts(),
         )
         .await
         .expect("scan summaries");
@@ -4883,6 +5072,115 @@ mod tests {
             [format!("#{} Codex index title", row.id)],
             "scan-discovered titles must propagate to a bound chat thread"
         );
+    }
+
+    /// A custom agent on `package`, saved the way the add form saves one.
+    fn npx_agent_def(id: &str, package: &str) -> crate::acp::custom_registry::CustomAgentDef {
+        use crate::acp::custom_registry::{
+            CustomAgentDef, CustomAgentSpec, CustomDistributionKind, NpxSpec,
+        };
+        CustomAgentDef {
+            registry_id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            version: String::new(),
+            distribution_kind: CustomDistributionKind::Npx,
+            spec: CustomAgentSpec {
+                npx: Some(NpxSpec {
+                    package: package.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            icon_url: None,
+            skills_shared_store: false,
+            skills_dir: None,
+            source: Default::default(),
+            version_probe: None,
+            supports_mcp: true,
+        }
+    }
+
+    /// The import skips a Claude Code session whose usage a custom agent's
+    /// conversation counts, so the picker must not offer it as new.
+    #[tokio::test]
+    // `hydrate` replaces a process-global map; the lock is held throughout.
+    #[allow(clippy::await_holding_lock)]
+    async fn scan_shows_a_claude_session_a_custom_agent_counts_as_imported() {
+        use crate::acp::custom_registry::{hydrate, hydrate_test_guard};
+        let _guard = hydrate_test_guard();
+        hydrate(&[
+            npx_agent_def(
+                "scan-claude-adapter",
+                "@agentclientprotocol/claude-agent-acp",
+            ),
+            npx_agent_def("scan-other-adapter", "@zed-industries/claude-code-acp"),
+        ]);
+        let db = fresh_in_memory_db().await;
+        let cwd = "/tmp/codeg-scan-counted-elsewhere";
+        let folder_id = seed_folder(&db, cwd).await;
+        for (agent, session) in [
+            ("scan-claude-adapter", "counted"),
+            ("scan-other-adapter", "uncounted"),
+            ("scan-claude-adapter", "deleted"),
+            ("scan-claude-adapter", "carried-on"),
+        ] {
+            let agent = AgentType::custom(agent).unwrap();
+            let row = conversation_service::create(&db.conn, folder_id, agent, None, None)
+                .await
+                .expect("create");
+            conversation_service::bind_external_id(&db.conn, row.id, session, &[])
+                .await
+                .expect("bind");
+            if session == "deleted" {
+                conversation_service::soft_delete(&db.conn, row.id)
+                    .await
+                    .expect("soft delete");
+            }
+        }
+        // The adapter could not load `carried-from` again, so its conversation
+        // went on in `carried-on`, whose transcript continues the first one.
+        let transcripts = tempfile::tempdir().expect("transcripts root");
+        let carried = AgentType::custom("scan-claude-adapter").unwrap();
+        let header =
+            crate::acp_transcript::TranscriptHeader::new(&carried.as_wire(), "carried-on", cwd, 0)
+                .continuing("carried-from");
+        crate::acp_transcript::record_header_in(
+            transcripts.path(),
+            crate::acp::registry::registry_id_for(carried),
+            &header,
+        )
+        .await
+        .expect("record header");
+        let (_broadcaster, emitter) = sync_test_emitter();
+
+        let result = scan_importable_sessions_from_summaries(
+            &db.conn,
+            &emitter,
+            &crate::chat_channel::manager::ChatChannelManager::new(),
+            vec![
+                scan_summary("counted", AgentType::ClaudeCode, Some(cwd), at(0)),
+                scan_summary("uncounted", AgentType::ClaudeCode, Some(cwd), at(1)),
+                scan_summary("deleted", AgentType::ClaudeCode, Some(cwd), at(2)),
+                scan_summary("carried-from", AgentType::ClaudeCode, Some(cwd), at(3)),
+            ],
+            transcripts.path(),
+        )
+        .await
+        .expect("scan summaries");
+        hydrate(&[]);
+
+        let by_id: HashMap<&str, ScanSessionStatus> = result.folders[0]
+            .sessions
+            .iter()
+            .map(|s| (s.external_id.as_str(), s.status))
+            .collect();
+        assert_eq!(by_id["counted"], ScanSessionStatus::Imported);
+        assert_eq!(by_id["carried-from"], ScanSessionStatus::Imported);
+        assert_eq!(by_id["uncounted"], ScanSessionStatus::New);
+        // A deleted conversation counts nothing, so the session imports.
+        assert_eq!(by_id["deleted"], ScanSessionStatus::New);
+        assert_eq!(result.importable_count, 2);
     }
 
     /// The channel half of a title notification must not be on the caller's
@@ -5570,6 +5868,13 @@ mod tests {
     // directly against a test broadcaster and assert the emitted JSON.
     // ──────────────────────────────────────────────────────────────────────
 
+    /// The ACP transcripts root for import tests with no transcript to read:
+    /// one is read only for a conversation of a custom agent on the official
+    /// Claude adapter.
+    fn no_transcripts() -> &'static std::path::Path {
+        std::path::Path::new("/nonexistent/codeg-test-acp-transcripts")
+    }
+
     fn sync_test_emitter() -> (
         std::sync::Arc<crate::web::event_bridge::WebEventBroadcaster>,
         EventEmitter,
@@ -5940,7 +6245,8 @@ mod tests {
         .expect("child");
         let (broadcaster, emitter) = sync_test_emitter();
         let mut rx = broadcaster.subscribe();
-        delete_conversation_with_cleanup_core(&emitter, &db.conn, child.id)
+        let manager = crate::acp::manager::ConnectionManager::new();
+        delete_conversation_with_cleanup_core(&emitter, &db.conn, &manager, child.id)
             .await
             .expect("delete child");
         let mut saw_deleted = false;
@@ -6165,6 +6471,7 @@ mod tests {
                 key_of(AgentType::ClaudeCode, "s1"),
                 key_of(AgentType::Codex, "s2"),
             ],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6186,6 +6493,57 @@ mod tests {
         let convs = conversation::Entity::find().all(&db.conn).await.unwrap();
         assert_eq!(convs.len(), 2);
         assert!(convs.iter().all(|c| c.folder_id == folder_rows[0].id));
+    }
+
+    /// A Claude Code session whose usage a custom agent's conversation already
+    /// counts stays out even when a request names it.
+    #[tokio::test]
+    // `hydrate` replaces a process-global map; the lock is held throughout.
+    #[allow(clippy::await_holding_lock)]
+    async fn batch_import_skips_a_claude_session_a_custom_agent_counts() {
+        use crate::acp::custom_registry::{hydrate, hydrate_test_guard};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let _guard = hydrate_test_guard();
+        hydrate(&[npx_agent_def(
+            "batch-claude-adapter",
+            "@agentclientprotocol/claude-agent-acp",
+        )]);
+        let db = fresh_in_memory_db().await;
+        let cwd = "/tmp/proj-counted";
+        let folder_id = seed_folder(&db, cwd).await;
+        let agent = AgentType::custom("batch-claude-adapter").unwrap();
+        let row = conversation_service::create(&db.conn, folder_id, agent, None, None)
+            .await
+            .expect("create");
+        conversation_service::bind_external_id(&db.conn, row.id, "counted", &[])
+            .await
+            .expect("bind");
+
+        let result = import_selected_from_summaries(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![
+                scan_summary("counted", AgentType::ClaudeCode, Some(cwd), at(0)),
+                scan_summary("fresh", AgentType::ClaudeCode, Some(cwd), at(1)),
+            ],
+            vec![
+                key_of(AgentType::ClaudeCode, "counted"),
+                key_of(AgentType::ClaudeCode, "fresh"),
+            ],
+            no_transcripts(),
+        )
+        .await
+        .expect("batch import");
+        hydrate(&[]);
+
+        assert_eq!((result.imported, result.skipped), (1, 1));
+        let claude_rows = conversation::Entity::find()
+            .filter(conversation::Column::AgentType.eq("claude_code"))
+            .all(&db.conn)
+            .await
+            .unwrap();
+        assert_eq!(claude_rows.len(), 1);
+        assert_eq!(claude_rows[0].external_id.as_deref(), Some("fresh"));
     }
 
     // A session whose cwd is a linked git worktree of an open repo belongs
@@ -6212,6 +6570,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6261,6 +6620,7 @@ mod tests {
                 key_of(AgentType::Codex, "s0"),
                 key_of(AgentType::Codex, "s1"),
             ],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6319,6 +6679,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6368,6 +6729,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6427,6 +6789,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6484,6 +6847,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6529,6 +6893,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6573,6 +6938,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6611,6 +6977,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::Codex, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6643,6 +7010,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6690,6 +7058,7 @@ mod tests {
             &EventEmitter::Noop,
             summaries,
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .expect("batch import");
@@ -6726,6 +7095,7 @@ mod tests {
             &EventEmitter::Noop,
             make(),
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6739,6 +7109,7 @@ mod tests {
                 key_of(AgentType::ClaudeCode, "s1"),
                 key_of(AgentType::Codex, "does-not-exist"),
             ],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6766,6 +7137,7 @@ mod tests {
             &EventEmitter::Noop,
             make(),
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6790,6 +7162,7 @@ mod tests {
             &EventEmitter::Noop,
             make(),
             vec![key_of(AgentType::ClaudeCode, "s1")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6822,6 +7195,7 @@ mod tests {
             folder_id,
             &items,
             import_service::DeletedPolicy::Skip,
+            &HashSet::new(),
         )
         .await
         .unwrap();
@@ -6843,6 +7217,7 @@ mod tests {
             folder_id,
             &items,
             import_service::DeletedPolicy::Skip,
+            &HashSet::new(),
         )
         .await
         .unwrap();
@@ -6866,6 +7241,7 @@ mod tests {
             &EventEmitter::Noop,
             vec![(agent, child)],
             vec![key_of(AgentType::Hermes, "child")],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6901,6 +7277,7 @@ mod tests {
                 key_of(AgentType::ClaudeCode, "s1"),
                 key_of(AgentType::Codex, "s2"),
             ],
+            no_transcripts(),
         )
         .await
         .unwrap();
@@ -6993,6 +7370,7 @@ mod tests {
                 999_999,
                 &items,
                 import_service::DeletedPolicy::Skip,
+                &HashSet::new(),
             )
             .await;
         assert_eq!(failed, 2, "both rows fail the folder FK and are counted");
@@ -7009,6 +7387,7 @@ mod tests {
                 folder_id,
                 &items,
                 import_service::DeletedPolicy::Skip,
+                &HashSet::new(),
             )
             .await;
         assert_eq!(failed2, 0);
@@ -7033,7 +7412,8 @@ mod tests {
                 &db.conn,
                 999_999,
                 &items,
-                import_service::DeletedPolicy::Skip
+                import_service::DeletedPolicy::Skip,
+                &HashSet::new()
             )
             .await
             .is_err(),

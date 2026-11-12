@@ -31,7 +31,7 @@
 
 <table>
   <tr>
-    <td width="50%" valign="top">🧩 <strong>واجهة واحدة لكل الوكلاء</strong><br/>تسعة عشر وكيلاً مدمجًا، ويمكن لأي وكيل متوافق مع ACP الانضمام — ويُعرض عملهم جميعًا كمحادثة منظَّمة موحّدة، لا كطرفية.</td>
+    <td width="50%" valign="top">🧩 <strong>واجهة واحدة لكل الوكلاء</strong><br/>عشرون وكيلاً مدمجًا، ويمكن لأي وكيل متوافق مع ACP الانضمام — ويُعرض عملهم جميعًا كمحادثة منظَّمة موحّدة، لا كطرفية.</td>
     <td width="50%" valign="top">🔎 <strong>جلسات تنتقل معك</strong><br/>استورد السجل الذي يحفظه كل وكيل على القرص، وابحث فيه، واستأنفه، ثم سلّمه إلى وكيل آخر.</td>
   </tr>
   <tr>
@@ -39,59 +39,6 @@
     <td width="50%" valign="top">🌍 <strong>أينما تعمل</strong><br/>تطبيق سطح المكتب، وخادم مستضاف ذاتيًا أو Docker، وiPhone وiPad وAndroid — وكذلك Telegram أو Lark أو WeChat.</td>
   </tr>
 </table>
-
-## 💖 الرعاة
-
-<table>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg" target="_blank"><img src="../images/compshare.png" alt="Compshare" width="160" /></a><br/>
-      <strong><a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">Compshare (UCloud)</a></strong>
-    </td>
-    <td>شكراً لـ Compshare على رعاية هذا المشروع! Compshare هي منصة الذكاء الاصطناعي السحابية التابعة لشركة UCloud، وتقدّم باقات Plan للوكلاء بنماذج محلية بأسعار اقتصادية شهرياً أو حسب الاستخدام، بدءاً من 49 يوان/شهر. كما توفّر وصولاً مستقراً إلى النماذج الأجنبية عبر وكيل رسمي. تدعم التكامل مع Claude Code وCodex واستدعاءات API. جاهزة للمؤسسات: تزامن عالٍ، ودعم فني على مدار الساعة طوال أيام الأسبوع، وإصدار الفواتير ذاتياً. المستخدمون الذين يسجّلون عبر <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">هذا الرابط</a> يحصلون على رصيد تجريبي مجاني بقيمة 5 يوان على المنصة!</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://hezu.ink/sign-up?aff=0wVz" target="_blank"><img src="../images/hezu-ink.jpg" alt="合租巴士" width="200" /></a><br/>
-      <strong><a href="https://hezu.ink/sign-up?aff=0wVz">合租巴士</a></strong>
-    </td>
-    <td>شكراً لـ 合租巴士 على رعاية هذا المشروع! 合租巴士 هي منصة موثوقة وفعّالة لخدمات ترحيل الذكاء الاصطناعي، توفّر ترحيلاً عالي الاستقرار للنماذج الرئيسية مثل Codex وClaude Code. نسبة الشحن شفافة (1:1)، مع دعم لمعدّل Codex يبدأ من 0.08 فقط. <a href="https://hezu.ink/sign-up?aff=0wVz">انضم إلى المجموعة عبر الموقع الرسمي للحصول على رصيد تجريبي بقيمة 5 دولارات</a>.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://go.apimart.ai/gh-codeg" target="_blank"><img src="../images/apimart-ai.png" alt="APIMart" width="200" /></a><br/>
-      <strong><a href="https://go.apimart.ai/gh-codeg">APIMart</a></strong>
-    </td>
-    <td>شكراً لـ APIMart على رعاية هذا المشروع! APIMart منصة API منخفضة التكلفة متخصصة في توليد الصور والفيديو بالذكاء الاصطناعي — GPT-Image-2 ابتداءً من 0.006 دولار للصورة، أي أكثر من 160 صورة بالدولار الواحد. واجهة API واحدة غير متزامنة تغطي الصور والفيديو معاً: أرسل المهمة، واحصل على معرّف، ثم استرجع النتائج عبر الاستطلاع أو عبر رد النداء. عالج عشرات الآلاف من الصور دفعةً واحدة دون انتهاء المهلة، وبدّل النماذج دون تغيير الشيفرة. الدفع حسب الاستخدام دون رسوم شهرية — <a href="https://go.apimart.ai/gh-codeg">سجّل من هنا</a> للبدء.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg" target="_blank"><img src="../images/astraflow.png" alt="UCloud ·星图AstraFlow" width="120" /></a><br/>
-      <strong><a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg">UCloud ·星图AstraFlow</a></strong>
-    </td>
-    <td>
-      <a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg">UCloud ·星图AstraFlow</a><br/>
-      منصة النماذج الكبيرة AstraFlow من UCloud تتيح استدعاء أكثر من 200 نموذج بنقرة واحدة: تتضمّن نماذج مفتوحة المصدر رائدة عالمياً مثل Kimi K3 وDeepSeek V4/V3 وQwen 3 وGLM5.2 وhappyhorse، دون الحاجة إلى تدريب خاص بك، وجاهزة للاستخدام مباشرة.<br/>
-      سجّل عبر الرابط أعلاه باستخدام <strong>البريد الإلكتروني</strong>، وأكمل التحقق من الهوية، ثم <a href="https://f.howxm.com/xs/u/HVFW5X8EIYV1">احصل على 50 يواناً من رصيد الحوسبة</a>.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG" target="_blank"><img src="../images/sidrune-ai.png" alt="Sidrune AI" width="200" /></a><br/>
-      <strong><a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG">Sidrune AI</a></strong>
-    </td>
-    <td>شكراً لـ Sidrune AI على رعاية هذا المشروع! توفّر Sidrune AI واجهة API واحدة للوصول إلى GPT وClaude وغيرها من نماذج الذكاء الاصطناعي الرئيسية. يحصل المستخدمون الجدد على رصيد API بقيمة 3 دولارات عند التسجيل عبر <a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG">رابطنا المخصّص</a> باستخدام الرمز الترويجي <code>SDRCODEG</code>.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA" target="_blank"><img src="../images/beeapi.jpg" alt="BeeAPI" width="200" /></a><br/>
-      <strong><a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA">BeeAPI</a></strong>
-    </td>
-    <td>شكراً لـ <a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA">BeeAPI</a> على رعاية هذا المشروع! BeeAPI هي منصة احترافية لتمرير وتجميع واجهات API لنماذج ذكاء اصطناعي متعددة، تجمع العديد من المزوّدين ومجموعة واسعة من نماذج الذكاء الاصطناعي الرائدة. وهي تدعم مقارنة الأسعار بين المزوّدين، والتوجيه الذكي عبر مجموعات متعددة، والوصول الموحّد عبر API مع فوترة موحّدة، مما يساعدك على استخدام خدمات الذكاء الاصطناعي بمرونة واستقرار وتكلفة أقل.</td>
-  </tr>
-</table>
-
-> هل ترغب في أن تصبح راعياً لـ Codeg؟ [راسلنا عبر البريد الإلكتروني.](mailto:itpkcn@gmail.com)
 
 ## ✨ المزايا
 
@@ -101,7 +48,7 @@
 
 ### واجهة واحدة لكل الوكلاء
 
-19 وكيلًا مدمجًا وأي وكيل ACP، في محادثة واحدة مع بطاقات أدوات وفروق مباشرة وردود تفاعلية.
+20 وكيلًا مدمجًا وأي وكيل ACP، في محادثة واحدة مع بطاقات أدوات وفروق مباشرة وردود تفاعلية.
 
 [التوثيق ←](https://docs.codeg.app/guide/supported-agents) · [الوكلاء المخصّصون ←](https://docs.codeg.app/guide/custom-agents) · [عرض الواجهة ←](https://docs.codeg.app/guide/skills#cards-tables-and-charts-in-replies)
 
@@ -273,7 +220,7 @@ git diff | codeg-cli -a codex \
 
 ## 🤖 الوكلاء المدعومون
 
-يتواصل Codeg مع كل وكيل عبر [Agent Client Protocol](https://agentclientprotocol.com)، فيحصل كلٌّ منهم على الواجهة المنظَّمة نفسها. ويأتي بتسعة عشر وكيلاً مدمجًا، يتولّى تثبيت معظمهم وتثبيت إصداراتهم وتحديثهم نيابةً عنك:
+يتواصل Codeg مع كل وكيل عبر [Agent Client Protocol](https://agentclientprotocol.com)، فيحصل كلٌّ منهم على الواجهة المنظَّمة نفسها. ويأتي بعشرين وكيلاً مدمجًا، يتولّى تثبيت معظمهم وتثبيت إصداراتهم وتحديثهم نيابةً عنك:
 
 <p>
   <a href="https://www.anthropic.com/claude-code"><kbd><img src="../images/agents/claude-code.svg" alt="" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
@@ -285,6 +232,7 @@ git diff | codeg-cli -a codex \
   <a href="https://hermes-agent.nousresearch.com"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/hermes-agent-dark.svg" /><img src="../images/agents/hermes-agent.svg" alt="" width="16" valign="middle" /></picture> Hermes Agent</kbd></a> &nbsp;
   <a href="https://www.codebuddy.ai"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/codebuddy-dark.svg" /><img src="../images/agents/codebuddy.svg" alt="" width="16" valign="middle" /></picture> CodeBuddy</kbd></a> &nbsp;
   <a href="https://www.kimi.com/code"><kbd><img src="../images/agents/kimi-code.svg" alt="" width="16" valign="middle" /> Kimi Code</kbd></a> &nbsp;
+  <a href="../agents/minimax-code.md"><kbd><img src="../images/agents/minimax-code.svg" alt="" width="16" valign="middle" /> MiniMax Code</kbd></a> &nbsp;
   <a href="https://pi.dev"><kbd><img src="../images/agents/pi.svg" alt="" width="16" valign="middle" /> Pi</kbd></a> &nbsp;
   <a href="https://x.ai/cli"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/grok-dark.svg" /><img src="../images/agents/grok.svg" alt="" width="16" valign="middle" /></picture> Grok</kbd></a> &nbsp;
   <a href="https://cursor.com/cli"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/cursor-dark.svg" /><img src="../images/agents/cursor.svg" alt="" width="16" valign="middle" /></picture> Cursor</kbd></a> &nbsp;

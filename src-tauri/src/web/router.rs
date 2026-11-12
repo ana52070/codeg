@@ -948,6 +948,10 @@ pub fn build_router_with_proxy_auth(
             post(handlers::version_control::validate_gitea_token),
         )
         .route(
+            "/validate_cnb_token",
+            post(handlers::version_control::validate_cnb_token),
+        )
+        .route(
             "/save_account_token",
             post(handlers::version_control::save_account_token),
         )
@@ -1106,12 +1110,12 @@ pub fn build_router_with_proxy_auth(
             post(handlers::acp::acp_qoder_auth_status),
         )
         .route(
-            "/acp_update_kimi_code_config",
-            post(handlers::acp::acp_update_kimi_code_config),
+            "/acp_update_claude_model_picker",
+            post(handlers::acp::acp_update_claude_model_picker),
         )
         .route(
-            "/acp_fetch_kimi_models",
-            post(handlers::acp::acp_fetch_kimi_models),
+            "/acp_update_kimi_code_config",
+            post(handlers::acp::acp_update_kimi_code_config),
         )
         .route(
             "/acp_update_pi_config",
@@ -1242,6 +1246,10 @@ pub fn build_router_with_proxy_auth(
             post(handlers::acp::acp_list_agent_skills),
         )
         .route(
+            "/acp_list_agent_runtime_skills",
+            post(handlers::acp::acp_list_agent_runtime_skills),
+        )
+        .route(
             "/acp_read_agent_skill",
             post(handlers::acp::acp_read_agent_skill),
         )
@@ -1266,12 +1274,48 @@ pub fn build_router_with_proxy_auth(
             post(handlers::acp::codex_bundled_catalog),
         )
         .route(
-            "/opencode_install_plugins",
-            post(handlers::acp::opencode_install_plugins),
+            "/opencode_list_integrations",
+            post(handlers::opencode_credentials::opencode_list_integrations),
         )
         .route(
-            "/opencode_uninstall_plugin",
-            post(handlers::acp::opencode_uninstall_plugin),
+            "/opencode_connect_key",
+            post(handlers::opencode_credentials::opencode_connect_key),
+        )
+        .route(
+            "/opencode_disconnect_provider",
+            post(handlers::opencode_credentials::opencode_disconnect_provider),
+        )
+        .route(
+            "/codex_fetch_endpoint_catalog",
+            post(handlers::acp::codex_fetch_endpoint_catalog),
+        )
+        .route(
+            "/codex_catalog_plan_preview",
+            post(handlers::acp::codex_catalog_plan_preview),
+        )
+        .route(
+            "/codex_endpoint_catalog_published",
+            post(handlers::acp::codex_endpoint_catalog_published),
+        )
+        .route(
+            "/codex_endpoint_catalog_cached",
+            post(handlers::acp::codex_endpoint_catalog_cached),
+        )
+        .route(
+            "/codex_endpoint_catalog_status",
+            post(handlers::acp::codex_endpoint_catalog_status),
+        )
+        .route(
+            "/codex_refresh_endpoint_catalog",
+            post(handlers::acp::codex_refresh_endpoint_catalog),
+        )
+        .route(
+            "/opencode_add_plugin",
+            post(handlers::acp::opencode_add_plugin),
+        )
+        .route(
+            "/opencode_remove_plugin",
+            post(handlers::acp::opencode_remove_plugin),
         )
         .route(
             "/codex_request_device_code",
@@ -1608,6 +1652,14 @@ pub fn build_router_with_proxy_auth(
             post(handlers::chat_channel::set_chat_event_webhooks),
         )
         .route(
+            "/get_chat_event_top_level_only",
+            post(handlers::chat_channel::get_chat_event_top_level_only),
+        )
+        .route(
+            "/set_chat_event_top_level_only",
+            post(handlers::chat_channel::set_chat_event_top_level_only),
+        )
+        .route(
             "/get_chat_message_language",
             post(handlers::chat_channel::get_chat_message_language),
         )
@@ -1639,6 +1691,10 @@ pub fn build_router_with_proxy_auth(
         .route(
             "/delete_model_provider",
             post(handlers::model_provider::delete_model_provider),
+        )
+        .route(
+            "/list_provider_models",
+            post(handlers::model_provider::list_provider_models),
         )
         // ─── Quick Messages ───
         .route(
@@ -1780,6 +1836,10 @@ pub fn build_router_with_proxy_auth(
             post(handlers::forge::forge_list_issues),
         )
         .route(
+            "/forge_issue_detail",
+            post(handlers::forge::forge_issue_detail),
+        )
+        .route(
             "/forge_tab_count",
             post(handlers::forge::forge_tab_count),
         )
@@ -1823,6 +1883,10 @@ pub fn build_router_with_proxy_auth(
         .route(
             "/work_task_create_from_forge",
             post(handlers::forge::work_task_create_from_forge),
+        )
+        .route(
+            "/work_task_create_from_forge_issues",
+            post(handlers::forge::work_task_create_from_forge_issues),
         )
         .route(
             "/work_task_lookup_by_source",
@@ -1920,13 +1984,13 @@ pub fn build_router_with_proxy_auth(
         )
         .route(
             "/background_set",
-            // A 16MiB image becomes ~21.4MiB once base64-encoded and wrapped in
+            // A 64MiB image becomes ~85.4MiB once base64-encoded and wrapped in
             // the JSON envelope; axum's default 2MiB `DefaultBodyLimit` would
             // 413 any real photo before the handler runs. Raise it to cover the
             // advertised ceiling; `backgrounds::validate_background` stays the
             // authoritative size boundary on the decoded bytes.
             post(handlers::background::background_set)
-                .layer(DefaultBodyLimit::max(24 * 1024 * 1024)),
+                .layer(DefaultBodyLimit::max(96 * 1024 * 1024)),
         )
         .route(
             "/background_clear",

@@ -20,10 +20,11 @@
  * Rendered as a centered, chrome-less divider (a horizontal rule flanking a
  * token-delta label) so it reads as a conversation boundary marker — "context
  * was compacted here" — not a real tool call. Recognition is by `_meta`, so it
- * works for the live stream and DB/snapshot reloads. In history the compaction
- * is hoisted to a dedicated standalone timeline item (see `message-list-view`'s
- * `"compaction"` render kind) so it sits BETWEEN turns rather than folding into
- * the preceding assistant reply.
+ * works for the live stream and DB/snapshot reloads. In history a compaction
+ * between replies is hoisted to a dedicated standalone timeline item (see
+ * `message-list-view`'s `"compaction"` render kind) so it sits BETWEEN turns
+ * rather than folding into the preceding assistant reply; one the agent ran
+ * mid-reply stays a step of that reply, on its rail, as it is drawn live.
  *
  * The ACP compaction lifecycle (claude-agent-acp 0.78.0+, codex-acp 1.13.0+)
  * can also carry the RETAINED SUMMARY — what the model kept of the dropped
@@ -73,19 +74,26 @@ function readText(
 }
 
 /**
- * The two triggers every adapter agrees on, mapped to their message key.
+ * The triggers adapters send, mapped to their message key.
  *
  * Deliberately not exhaustive: `trigger` is adapter-defined vocabulary, and an
  * unrecognized value falls back to its raw string rather than being dropped or
  * mislabelled. The automatic case has two spellings in the wild — claude
  * renames the SDK's `auto` to `automatic` on the wire (and `parsers/claude.rs`
  * mirrors that rename for history), while deepseek's parser passes `auto`
- * through — so both map to the same key.
+ * through — so both map to the same key. claude-agent-acp 0.101.0 adds `idle`
+ * (#1522): the `/compact` the adapter sends itself shortly before the prompt
+ * cache of a large idle session expires. The transcript records that command
+ * like any other `/compact`, so only the live card ever says `idle`.
  */
-const TRIGGER_KEYS: Record<string, "triggerManual" | "triggerAutomatic"> = {
+const TRIGGER_KEYS: Record<
+  string,
+  "triggerManual" | "triggerAutomatic" | "triggerIdle"
+> = {
   manual: "triggerManual",
   auto: "triggerAutomatic",
   automatic: "triggerAutomatic",
+  idle: "triggerIdle",
 }
 
 /** `durationMs` as a compact human label ("3.2s" / "45s"), or null. */
@@ -185,8 +193,8 @@ export function ContextCompactionCard({ state, meta, summary }: Props) {
   const duration = formatDuration(readNumber(payload, "durationMs"))
   // Trigger and error ride in the tooltip rather than inline prose — they
   // answer "why did this happen", which is a second-order question next to the
-  // delta. Only the two shared triggers are translated; anything else is an
-  // adapter's own word and is surfaced verbatim.
+  // delta. Only the triggers in `TRIGGER_KEYS` are translated; anything else
+  // is an adapter's own word and is surfaced verbatim.
   const trigger = readText(payload, "trigger")
   const triggerKey = trigger ? TRIGGER_KEYS[trigger.toLowerCase()] : undefined
   const tooltip =

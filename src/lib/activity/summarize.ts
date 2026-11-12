@@ -15,8 +15,8 @@
  */
 
 import { buildBackgroundTaskRows } from "@/lib/background-task"
-import { delegateCallTaskId } from "@/lib/delegation-card"
 import { buildDelegationTaskRows } from "@/lib/delegation-status"
+import { delegationStepTaskId } from "./delegation-task"
 import { isFailureStatus, isLiveStatus } from "./status"
 import type {
   ActivityCounts,
@@ -37,6 +37,16 @@ function retrySignature(
       const command = tool.command?.display.replace(/\s+/g, " ").trim()
       return command ? `command:${command}` : null
     }
+    // The same watch started again, or the same host asked for again; never
+    // a command of the same text, which is another thing.
+    case "monitor": {
+      const watched = tool.command?.display.replace(/\s+/g, " ").trim()
+      return watched ? `monitor:${watched}` : null
+    }
+    case "network":
+      return tool.target
+        ? `network:${tool.target.full ?? tool.target.text}`
+        : null
     case "edit": {
       const paths = (tool.files ?? []).map((f) => f.path).sort()
       return paths.length > 0 ? `edit:${paths.join("\n")}` : null
@@ -116,7 +126,7 @@ export function summarizeActivity(steps: ActivityStep[]): ActivitySummary {
       // A delegation stands where its task's newest check says. The checks
       // are rows of their own, but a task that failed is the delegation's
       // failure — counted once, on its row.
-      const taskId = delegateCallTaskId(step.part)
+      const taskId = delegationStepTaskId(step)
       const task = buildDelegationTaskRows(step.laterPolls).find(
         (row) => row.taskId === taskId
       )

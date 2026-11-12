@@ -919,12 +919,29 @@ fn context_continuation_text(content: &[ContentBlock]) -> Option<&str> {
 }
 
 /// The framing ahead of the summary in a continuation message: its opening
-/// sentence, then the `Summary:` line the CLI puts the summary under.
+/// sentence, any `<system-reminder>` blocks, then the `Summary:` line the CLI
+/// puts the summary under.
+///
+/// Claude Code 2.1.312 started putting a reminder for the model between the
+/// opening sentence and `Summary:` (every summary written by 2.1.312, 2.1.316
+/// and 2.1.318 on the machine this was measured on has one):
+///
+/// ```text
+/// This session is being continued from a previous conversation that ran out of context. …
+///
+/// <system-reminder>
+/// <tools-used-before-summary>Bash, Read, …</tools-used-before-summary>
+/// </system-reminder>
+/// Summary:
+/// ```
+///
+/// Only closed reminder blocks are skipped. An unclosed one, or any other text
+/// there, stays in the summary, as an unknown framing always has.
 fn continuation_preamble_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(&format!(
-            r"\A\s*{}[^\n]*\n(?:[ \t]*\r?\n)*(?:[ \t]*Summary:[ \t]*\r?\n)?",
+            r"\A\s*{}[^\n]*\n(?:[ \t]*\r?\n)*(?:[ \t]*<system-reminder>[\s\S]*?</system-reminder>[ \t]*\r?\n(?:[ \t]*\r?\n)*)*(?:[ \t]*Summary:[ \t]*\r?\n)?",
             regex::escape(CONTEXT_CONTINUATION_PREFIX)
         ))
         .unwrap()
@@ -933,12 +950,17 @@ fn continuation_preamble_regex() -> &'static Regex {
 
 /// Whether `line` is one of the instructions the CLI appends to a continuation
 /// message after the summary: where the full pre-compaction transcript lives,
-/// and to pick the work back up without asking.
+/// to pick the work back up without asking, and (Claude Code 2.1.293 and
+/// later, after every summary) that the messages kept after the summary are
+/// newer than it.
 fn is_continuation_trailer(line: &str) -> bool {
     let line = line.trim_start();
     line.starts_with("If you need specific details from before compaction")
         || line.starts_with("Continue the conversation from where it left off")
         || line.starts_with("Please continue the conversation from where")
+        || line.starts_with(
+            "The messages after this summary are the most recent messages from before compaction",
+        )
 }
 
 /// The summary a continuation message carries, without the framing the CLI
@@ -972,7 +994,7 @@ fn continuation_summary_text(message: &str) -> String {
 
 /// Whether a reconstructed slash-command display line is a `/compact`
 /// invocation — bare, or carrying the focus instructions it accepts.
-fn is_compact_command(display: &str) -> bool {
+pub(crate) fn is_compact_command(display: &str) -> bool {
     display == "/compact" || display.starts_with("/compact ")
 }
 
@@ -2151,10 +2173,13 @@ impl ClaudeRecordAccumulator {
                     //
                     // `background_watch` also keys its overlay turn ids by
                     // position, so an insert inside an open episode re-emits
-                    // everything after it. Only a manual compaction inserts,
-                    // and a manual one is a foreground submission — the
-                    // watcher's foreground window is closed around it. Were
-                    // that ever to change the cost is a duplicate overlay
+                    // everything after it. A `/compact` codeg sent is a
+                    // foreground submission, which no episode sees. One it did
+                    // not send (claude-agent-acp 0.101.0 sends its own for an
+                    // idle session) opens an episode AT this echo, handed the
+                    // boundary and the summary the watcher held back for it,
+                    // so the insert lands before the episode's first emission.
+                    // Were that ever to change the cost is a duplicate overlay
                     // turn, which the refetch watermark retires.
                     for owner in usage_owner_by_message_id.values_mut() {
                         if *owner >= at {
@@ -3007,19 +3032,49 @@ fn user_content_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
     }
 
     if let Some(arr) = content.as_array() {
+        // Whether the item just read was a text block that became the last of
+        // `blocks`: the only text a document block can be the stand-in for.
+        let mut after_text = false;
         for item in arr {
+            let follows_text = std::mem::replace(&mut after_text, false);
             let block_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match block_type {
                 "text" => {
                     if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
                         if let Some(cleaned) = strip_system_tags(text) {
                             blocks.push(ContentBlock::Text { text: cleaned });
+                            after_text = true;
                         }
                     }
                 }
                 "image" => {
                     if let Some(image_block) = extract_claude_user_image(item) {
                         blocks.push(image_block);
+                    }
+                }
+                "document" => {
+                    // claude-agent-acp 0.99.0 (#1460) sends a PDF that came as
+                    // a blob resource as a document block, right after the link
+                    // it writes for the resource (`formatUriAsLink`). The PDF
+                    // itself has no block of its own here, so that link becomes
+                    // the attachment the prompt is shown with live, by the same
+                    // rule (`project_user_prompt_block`). Left as it was, a
+                    // pasted PDF read back as a bare `clipboard://…` address.
+                    // Only a PDF (the one document type the adapter sends) and
+                    // only the text block right before it.
+                    let is_pdf = item
+                        .get("source")
+                        .and_then(|source| source.get("media_type"))
+                        .and_then(|media_type| media_type.as_str())
+                        == Some("application/pdf");
+                    if follows_text && is_pdf {
+                        if let Some(ContentBlock::Text { text }) = blocks.last_mut() {
+                            if let Some(shown) =
+                                bare_adapter_link(text).and_then(pdf_attachment_text)
+                            {
+                                *text = shown;
+                            }
+                        }
                     }
                 }
                 "tool_result" | "server_tool_result" => {
@@ -3048,6 +3103,61 @@ fn user_content_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
     }
 
     blocks
+}
+
+/// claude-agent-acp's `formatUriAsLink`, the text it writes into a user record
+/// for a resource or a resource link in the prompt: `[@name](uri)` for a
+/// `file://` or `zed://` uri, named after its last path segment, and the bare
+/// uri for anything else (a web page, a pasted file's `clipboard://` uri).
+pub(crate) fn claude_uri_link(uri: &str) -> String {
+    let named = |rest: &str| {
+        let name = rest
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(rest);
+        format!("[@{name}]({uri})")
+    };
+    if let Some(path) = uri.strip_prefix("file://") {
+        named(path)
+    } else if uri.starts_with("zed://") {
+        named(uri)
+    } else {
+        uri.to_string()
+    }
+}
+
+/// `text` as a uri when it is exactly the bare link [`claude_uri_link`] writes
+/// for one: a uri that is not a `file://` or `zed://` one, such as a pasted
+/// file's `clipboard://` uri. A `[@name](uri)` link is left alone; the
+/// transcript already reads it back as the named attachment.
+fn bare_adapter_link(text: &str) -> Option<String> {
+    let text = text.trim();
+    // A scheme (RFC 3986: a letter, then letters, digits, `+`, `-`, `.`), then
+    // `://`, and no whitespace anywhere.
+    let scheme = text.split_once("://")?.0;
+    let is_uri = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        && !text.chars().any(char::is_whitespace);
+    (is_uri && claude_uri_link(text) == text).then(|| text.to_string())
+}
+
+/// What the live user turn shows for a PDF sent as a blob resource, by the
+/// rule every surface shares ([`crate::acp::types::project_user_prompt_block`]).
+fn pdf_attachment_text(uri: String) -> Option<String> {
+    use crate::acp::types::{project_user_prompt_block, PromptInputBlock, UserTurnBlock};
+    let block = PromptInputBlock::Resource {
+        uri,
+        mime_type: Some("application/pdf".to_string()),
+        text: None,
+        blob: Some(String::new()),
+    };
+    match project_user_prompt_block(&block) {
+        UserTurnBlock::Text { text } => Some(text),
+        UserTurnBlock::Image { .. } => None,
+    }
 }
 
 /// The conversation title a user message gives: from its first text block.
@@ -3382,12 +3492,81 @@ pub(crate) fn extract_assistant_content(value: &serde_json::Value) -> Vec<Conten
                         meta: None,
                     });
                 }
+                "advisor_tool_result" => {
+                    if let Some(result) = advisor_tool_result(item) {
+                        // Its own record, like the call's: `relocate_orphaned_tool_results`
+                        // moves it next to the call.
+                        blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: Some(result.tool_use_id),
+                            output_preview: result.text,
+                            is_error: result.is_error,
+                            agent_stats: None,
+                            images: Vec::new(),
+                            exit_code: None,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     blocks
+}
+
+/// The text claude-agent-acp shows for advice the API returned encrypted
+/// (`advisor_redacted_result`), copied from 0.97.0's `toAcpNotifications`.
+const ADVISOR_REDACTED_RESULT_TEXT: &str = "Advisor guidance applied server-side.";
+
+/// One `advisor_tool_result` block, read the way the live path reports it.
+pub(crate) struct AdvisorToolResult {
+    pub(crate) tool_use_id: String,
+    pub(crate) text: Option<String>,
+    pub(crate) is_error: bool,
+}
+
+/// The result of a call to Claude's `advisor` server tool (the `advisorModel`
+/// setting or `--advisor`), from an assistant record's `advisor_tool_result`
+/// block. `None` for a block that names no call.
+///
+/// A server tool runs inside the API request, so its result is not a user
+/// `tool_result`: the response carries the `server_tool_use` call and this
+/// block side by side, and Claude Code writes each as an assistant record of
+/// its own (same `message.id`). claude-agent-acp 0.97.0 (#1247) completes the
+/// live tool call from the block: the advice when the API sends it in plain
+/// text, a fixed line when it sends it encrypted, and `Advisor error: <code>`
+/// as a failure. This reads it the same way, so a reloaded session shows what
+/// the live one did. Before 0.97.0 the adapter dropped the block, failed the
+/// call ("Claude ended the turn without returning a result for this tool.")
+/// and the turn with it.
+///
+/// An unknown `content.type` yields no text and no failure: the call happened,
+/// and nothing here can say more.
+pub(crate) fn advisor_tool_result(item: &serde_json::Value) -> Option<AdvisorToolResult> {
+    let tool_use_id = item
+        .get("tool_use_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    let content = item.get("content");
+    let field = |key: &str| content.and_then(|c| c.get(key)).and_then(|v| v.as_str());
+    let (text, is_error) = match field("type") {
+        Some("advisor_result") => (field("text").map(str::to_string), false),
+        Some("advisor_redacted_result") => (Some(ADVISOR_REDACTED_RESULT_TEXT.to_string()), false),
+        Some("advisor_tool_result_error") => (
+            Some(match field("error_code") {
+                Some(code) => format!("Advisor error: {code}"),
+                None => "Advisor error".to_string(),
+            }),
+            true,
+        ),
+        _ => (None, false),
+    };
+    Some(AdvisorToolResult {
+        tool_use_id,
+        text,
+        is_error,
+    })
 }
 
 /// `pub(crate)`: shared with `parsers::qoder` — qoder meters its subscription
@@ -3785,6 +3964,16 @@ pub(crate) fn parse_subagent_tool_calls(path: &PathBuf) -> SubagentTranscript {
                                     text: None,
                                     child_index: Some(calls.len() - 1),
                                 });
+                            }
+                        }
+                        // A server tool's result rides the assistant side (see
+                        // `advisor_tool_result`).
+                        "advisor_tool_result" => {
+                            if let Some(result) = advisor_tool_result(item) {
+                                results.insert(
+                                    result.tool_use_id,
+                                    (result.text.map(|s| truncate_str(&s, 500)), result.is_error),
+                                );
                             }
                         }
                         "thinking" | "text" => {
@@ -4553,6 +4742,162 @@ mod tests {
             input,
             json!({"file_path": "/w/lib.rs", "old_string": "a", "new_string": "b"})
         );
+    }
+
+    /// What Claude Code 2.1.310 writes for one API message that called the
+    /// `advisor` server tool (recorded against a fake API, ids shortened): one
+    /// assistant record per content block, the call and its result included,
+    /// all under the same `message.id`.
+    fn advisor_transcript(result_content: serde_json::Value) -> Vec<String> {
+        let assistant = |uuid: &str, at: &str, block: serde_json::Value| {
+            json!({
+                "type": "assistant", "timestamp": at, "uuid": uuid,
+                "cwd": "/Users/test/proj", "sessionId": "sess-advisor",
+                "message": {
+                    "id": "msg_adv", "role": "assistant", "model": "claude-opus-5-5",
+                    "content": [block],
+                    "usage": {"input_tokens": 1000, "output_tokens": 7,
+                        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                },
+            })
+            .to_string()
+        };
+        vec![
+            json!({
+                "type": "user", "timestamp": "2026-10-26T14:20:24.379Z", "uuid": "u1",
+                "cwd": "/Users/test/proj", "sessionId": "sess-advisor",
+                "message": {"role": "user", "content": "check my plan with the advisor"},
+            })
+            .to_string(),
+            assistant(
+                "a1",
+                "2026-10-26T14:20:24.420Z",
+                json!({"type": "text", "text": "let me ask the advisor"}),
+            ),
+            assistant(
+                "a2",
+                "2026-10-26T14:20:24.421Z",
+                json!({"type": "server_tool_use", "id": "srvtoolu_adv", "name": "advisor", "input": {}}),
+            ),
+            assistant(
+                "a3",
+                "2026-10-26T14:20:24.422Z",
+                json!({"type": "advisor_tool_result", "tool_use_id": "srvtoolu_adv",
+                    "content": result_content}),
+            ),
+            assistant(
+                "a4",
+                "2026-10-26T14:20:24.423Z",
+                json!({"type": "text", "text": "advisor consulted; final answer"}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_advisor_call_reads_its_result_from_the_assistant_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("-Users-test-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let lines = advisor_transcript(json!({
+            "type": "advisor_result",
+            "text": "ADVICE: check the edge cases first.",
+            "stop_reason": "end_turn",
+        }));
+        std::fs::write(proj.join("sess-advisor.jsonl"), lines.join("\n") + "\n").unwrap();
+
+        let parser = ClaudeParser::with_base_dir(dir.path().to_path_buf());
+        let detail = parser.get_conversation("sess-advisor").unwrap();
+        let turn = detail
+            .turns
+            .iter()
+            .find(|turn| {
+                turn.blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { tool_name, .. } if tool_name == "advisor")
+                })
+            })
+            .expect("the advisor call is a turn's block");
+        assert!(
+            turn.blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolResult {
+                    tool_use_id: Some(id),
+                    output_preview: Some(text),
+                    is_error: false,
+                    ..
+                } if id == "srvtoolu_adv" && text == "ADVICE: check the edge cases first."
+            )),
+            "the result sits with its call, as the live card has it: {:?}",
+            turn.blocks
+        );
+        // The result's own record leaves no turn behind once it is moved.
+        assert!(
+            detail.turns.iter().all(|turn| !turn
+                .blocks
+                .iter()
+                .all(|b| matches!(b, ContentBlock::ToolResult { .. }))),
+            "{:?}",
+            detail.turns
+        );
+    }
+
+    #[test]
+    fn advisor_results_read_as_the_live_adapter_reports_them() {
+        let read = |content: serde_json::Value| {
+            advisor_tool_result(&json!({
+                "type": "advisor_tool_result", "tool_use_id": "srvtoolu_adv", "content": content,
+            }))
+            .map(|r| (r.tool_use_id, r.text, r.is_error))
+        };
+        assert_eq!(
+            read(json!({"type": "advisor_result", "text": "do X", "stop_reason": "end_turn"})),
+            Some(("srvtoolu_adv".to_string(), Some("do X".to_string()), false))
+        );
+        // Encrypted advice is never shown, as the adapter never shows it.
+        assert_eq!(
+            read(json!({
+                "type": "advisor_redacted_result",
+                "encrypted_content": "Q0lQSEVS",
+                "stop_reason": "end_turn",
+            })),
+            Some((
+                "srvtoolu_adv".to_string(),
+                Some("Advisor guidance applied server-side.".to_string()),
+                false
+            ))
+        );
+        assert_eq!(
+            read(json!({"type": "advisor_tool_result_error", "error_code": "overloaded"})),
+            Some((
+                "srvtoolu_adv".to_string(),
+                Some("Advisor error: overloaded".to_string()),
+                true
+            ))
+        );
+        assert_eq!(
+            read(json!({"type": "advisor_future_kind"})),
+            Some(("srvtoolu_adv".to_string(), None, false))
+        );
+        assert!(advisor_tool_result(&json!({"type": "advisor_tool_result"})).is_none());
+    }
+
+    #[test]
+    fn a_subagent_advisor_call_gets_its_result() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for line in advisor_transcript(json!({"type": "advisor_tool_result_error",
+            "error_code": "overloaded"}))
+        .into_iter()
+        .skip(1)
+        {
+            writeln!(file, "{line}").unwrap();
+        }
+        let (calls, _, _, _, _) = parse_subagent_tool_calls(&file.path().to_path_buf());
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].tool_name, "advisor");
+        assert_eq!(
+            calls[0].output_preview.as_deref(),
+            Some("Advisor error: overloaded")
+        );
+        assert!(calls[0].is_error);
     }
 
     /// One sub-agent record, one content block. The helper keeps the fixture
@@ -5517,6 +5862,43 @@ mod tests {
         // Nothing but the opening sentence: better the sentence than nothing.
         let bare = "This session is being continued from a previous conversation…";
         assert_eq!(continuation_summary_text(bare), bare);
+    }
+
+    /// Claude Code 2.1.312 puts a `<system-reminder>` block between the opening
+    /// sentence and `Summary:`, and from 2.1.293 every summary ends with a line
+    /// about the messages kept after it. Both are framing for the model, and
+    /// come off like the rest of it.
+    #[test]
+    fn continuation_summary_text_strips_the_2_1_312_framing() {
+        let current = CONTINUATION
+            .replace(
+                "conversation.\n\nSummary:\n",
+                "conversation.\n\n<system-reminder>\n<tools-used-before-summary>Agent, Bash, Read</tools-used-before-summary>\n</system-reminder>\nSummary:\n",
+            )
+            + "\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. The summary was written without seeing them, so something it says has not happened yet may already have happened in them.";
+        assert!(current.contains("<system-reminder>"), "fixture applies");
+        assert_eq!(continuation_summary_text(&current), CONTINUATION_SUMMARY);
+
+        // Two reminder blocks, and blank lines around them.
+        let two = CONTINUATION.replace(
+            "conversation.\n\nSummary:\n",
+            "conversation.\n\n<system-reminder>\na\n</system-reminder>\n\n<system-reminder>b</system-reminder>\n\nSummary:\n",
+        );
+        assert_eq!(continuation_summary_text(&two), CONTINUATION_SUMMARY);
+
+        // An unclosed reminder is not framing this knows: it stays.
+        let unclosed = CONTINUATION.replace(
+            "conversation.\n\nSummary:\n",
+            "conversation.\n\n<system-reminder>\nnever closed\nSummary:\n",
+        );
+        assert!(continuation_summary_text(&unclosed).starts_with("<system-reminder>"));
+
+        // A summary that only quotes the kept-messages line mid-body keeps it.
+        let quoting = CONTINUATION.replace(
+            "   Fix the parser.",
+            "   Fix the parser.\nThe messages after this summary are the most recent messages from before compaction, it says.\n   Then test it.",
+        );
+        assert!(continuation_summary_text(&quoting).contains("it says.\n   Then test it."));
     }
 
     /// A compaction is a boundary between turns, so history has to draw the
@@ -8728,6 +9110,118 @@ mod tests {
             ContentBlock::Image { data, mime_type, uri }
             if data == "QUJDREVGRw==" && mime_type == "image/jpeg" && uri.is_none()
         ));
+    }
+
+    /// A PDF pasted into the composer reaches Claude through claude-agent-acp
+    /// 0.99.0 as the resource's link and a document block (from a real
+    /// transcript, the typed text first as the composer sends it). Read back,
+    /// it shows the attachment the live turn shows for the same prompt.
+    #[test]
+    fn a_pdf_blob_reads_back_as_the_attachment_the_live_turn_shows() {
+        use crate::acp::types::{user_blocks_from_prompt, PromptInputBlock, UserMessageBlock};
+        let uri = "clipboard://report.pdf-1";
+        let value = json!({
+            "message": {
+                "content": [
+                    {"type": "text", "text": "what is in the attachment?"},
+                    {"type": "text", "text": uri},
+                    {
+                        "type": "document",
+                        "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}
+                    }
+                ]
+            }
+        });
+        let live = user_blocks_from_prompt(&[
+            PromptInputBlock::Text {
+                text: "what is in the attachment?".into(),
+            },
+            PromptInputBlock::Resource {
+                uri: uri.into(),
+                mime_type: Some("application/pdf".into()),
+                text: None,
+                blob: Some("JVBERi0xLjQK".into()),
+            },
+        ]);
+        let live_texts: Vec<&str> = live
+            .iter()
+            .map(|block| match block {
+                UserMessageBlock::Text { text } => text.as_str(),
+                UserMessageBlock::Image { .. } => panic!("no image in this prompt"),
+            })
+            .collect();
+
+        let blocks = extract_user_content(&value);
+        let texts: Vec<&str> = blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text { text } => text.as_str(),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, live_texts);
+        assert_ne!(
+            texts[1], uri,
+            "the bare address no longer stands in the prose"
+        );
+    }
+
+    /// Only the adapter's bare link right before a document is rewritten. Its
+    /// `[@name](uri)` link for a file already reads back as the named
+    /// attachment; prose and a link with no document after it stay as written.
+    #[test]
+    fn only_the_adapters_bare_link_before_a_document_is_read_as_its_attachment() {
+        let doc = json!({
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}
+        });
+        let read = |content: serde_json::Value| -> Vec<String> {
+            extract_user_content(&json!({"message": {"content": content}}))
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => text,
+                    other => panic!("unexpected block {other:?}"),
+                })
+                .collect()
+        };
+
+        for kept in [
+            "[@a.pdf](file:///docs/a.pdf)",
+            "file:///docs/a.pdf",
+            "summarize this PDF",
+            "see https://example.com/a b.pdf",
+        ] {
+            assert_eq!(
+                read(json!([{"type": "text", "text": kept}, doc])),
+                vec![kept.to_string()]
+            );
+        }
+        assert_eq!(
+            read(json!([{"type": "text", "text": "clipboard://report.pdf-1"}])),
+            vec!["clipboard://report.pdf-1".to_string()]
+        );
+        // A document with no text before it adds nothing.
+        assert!(read(json!([doc])).is_empty());
+        // The adapter sends only PDFs as documents, and writes the link right
+        // before one: a text document, or a link with another block between it
+        // and the document (one that reads back as nothing included), is not
+        // its stand-in.
+        let text_doc = json!({
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": "notes"}
+        });
+        assert_eq!(
+            read(json!([{"type": "text", "text": "clipboard://notes.txt-1"}, text_doc])),
+            vec!["clipboard://notes.txt-1".to_string()]
+        );
+        assert_eq!(
+            read(json!([
+                {"type": "text", "text": "clipboard://report.pdf-1"},
+                {"type": "text", "text": "<system-reminder>noted</system-reminder>"},
+                doc
+            ])),
+            vec!["clipboard://report.pdf-1".to_string()]
+        );
     }
 
     #[test]

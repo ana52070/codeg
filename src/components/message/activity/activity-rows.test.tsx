@@ -407,8 +407,14 @@ describe("long replies", () => {
   })
 
   it("folds a streaming reply's rows away one at a time as it grows", () => {
+    // At work on its latest call: no prose after it yet, which would be one
+    // more row on the rail.
+    const running = (count: number): MessageTurn => {
+      const done = edits(count)
+      return { ...done, blocks: done.blocks.slice(0, -1) }
+    }
     const live = (count: number) => (
-      <Round parts={parts(edits(count), true)} completed={false} />
+      <Round parts={parts(running(count), true)} completed={false} />
     )
     const view = renderUi(live(150))
     expect(screen.getAllByText("Edited")).toHaveLength(150)
@@ -517,6 +523,97 @@ describe("approval chips", () => {
   })
 })
 
+describe("Claude Code's monitors and sandbox network requests", () => {
+  const record = (toolCallId: string, optionKind: string) => ({
+    tool_call_id: toolCallId,
+    option_kind: optionKind,
+    option_name: optionKind.startsWith("reject") ? "No" : "Yes",
+    origin: "user",
+    decided_at: "2026-10-28T09:41:12Z",
+  })
+  // Claude Code 2.1.310's result for a started Monitor, verbatim.
+  const STARTED =
+    "Monitor started (task bttyx34fg, expires in 5m unless the source ends first; you get one notice at expiry — re-arm if you still need the watch). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply."
+
+  it("draws a monitor as one, by its task, apart from the commands", () => {
+    const RUN = turn([
+      toolUse("c1", "Bash", { command: "pnpm build" }),
+      toolResult("c1", "built"),
+      toolUse("m1", "Monitor", {
+        command: "tail -f build.log | grep --line-buffered ERROR",
+        description: "Build errors",
+      }),
+      toolResult("m1", STARTED),
+      toolUse("c2", "Bash", { command: "pnpm test" }),
+      toolResult("c2", "ok"),
+    ])
+    renderUi(<Round parts={parts(RUN)} />)
+    // Not one of the commands around it.
+    expect(screen.queryByRole("button", { name: /Ran 2 commands/ })).toBeNull()
+    expect(screen.queryByRole("button", { name: /Ran 3 commands/ })).toBeNull()
+    const row = rowOf("Build errors")
+    expect(within(row).getByText("Monitor")).toBeTruthy()
+    expect(within(row).getByText("background · #bttyx34fg")).toBeTruthy()
+    fireEvent.click(within(row).getAllByRole("button")[0]!)
+    expect(
+      within(row).getByText("tail -f build.log | grep --line-buffered ERROR")
+    ).toBeTruthy()
+    expect(within(row).getByText("$")).toBeTruthy()
+    expect(
+      within(row).getByText("Watching in background · bttyx34fg")
+    ).toBeTruthy()
+    // The CLI's instructions to the model are not the reader's output.
+    expect(within(row).queryByText(/do not poll or sleep/)).toBeNull()
+  })
+
+  it("shows a WebSocket monitor's socket, not a command line", () => {
+    const RUN = turn([
+      toolUse("m1", "Monitor", {
+        ws: { url: "wss://ci.example.com/events" },
+        description: "CI events",
+      }),
+      toolResult("m1", STARTED),
+    ])
+    renderUi(<Round parts={parts(RUN)} />)
+    const row = rowOf("CI events")
+    expect(within(row).getByText("background · #bttyx34fg")).toBeTruthy()
+    fireEvent.click(within(row).getAllByRole("button")[0]!)
+    expect(within(row).getByText("wss://ci.example.com/events")).toBeTruthy()
+    expect(within(row).queryByText("$")).toBeNull()
+  })
+
+  it("names a declined network request's host, and opens to nothing", () => {
+    const DECLINED = turn([
+      toolUse("n1", "SandboxNetworkAccess", { host: "example.com" }),
+      toolResult("n1", "", true),
+    ])
+    renderUi(<Round parts={parts(DECLINED)} />, null, {
+      n1: record("n1", "reject_once"),
+    })
+    const row = rowOf("Network access")
+    expect(row.getAttribute("data-status")).toBe("rejected")
+    expect(within(row).getByText("example.com")).toBeTruthy()
+    expect(within(row).getAllByText("declined")).toHaveLength(1)
+    // Its one argument is on its line already: no panel of arguments.
+    expect(within(row).queryByText(/"host"/)).toBeNull()
+    expect(row.querySelector("[aria-expanded]")).toBeNull()
+  })
+
+  it("names an allowed network request's host", () => {
+    const ALLOWED = turn([
+      toolUse("n1", "SandboxNetworkAccess", { host: "registry.npmjs.org" }),
+      toolResult("n1", ""),
+    ])
+    renderUi(<Round parts={parts(ALLOWED)} />, null, {
+      n1: record("n1", "allow_once"),
+    })
+    const row = rowOf("Network access")
+    expect(row.getAttribute("data-status")).toBe("succeeded")
+    expect(within(row).getByText("registry.npmjs.org")).toBeTruthy()
+    expect(within(row).getByText("approved once")).toBeTruthy()
+  })
+})
+
 describe("a command group in a reply being written", () => {
   const LIVE = turn([
     toolUse("c1", "Bash", { command: "pnpm lint" }),
@@ -531,7 +628,7 @@ describe("a command group in a reply being written", () => {
       <Round parts={parts(LIVE, true, ["c3"])} completed={false} />
     )
     const group = rowOf("Running 3 commands")
-    const members = group.querySelectorAll(".activity-child")
+    const members = group.querySelectorAll(".activity-child[data-step-key]")
     expect([...members].map((m) => m.getAttribute("data-step-key"))).toEqual([
       "tool:c1",
       "tool:c2",
@@ -575,7 +672,9 @@ describe("a command group in a reply being written", () => {
       toolResult("c2", "ok"),
     ]
     const READ = toolUse("r1", "Read", { file_path: "/r/a.ts" })
-    const header = () => screen.getByRole("button", { name: /2 commands/ })
+    // The group's own header, not the row at the foot of its members.
+    const header = () =>
+      screen.getByRole("button", { name: /^(Ran|Running) 2 commands/ })
 
     it("folds by itself when the next step comes", () => {
       const view = renderUi(
@@ -655,6 +754,33 @@ describe("a command group in a reply being written", () => {
       )
       expect(header()).toHaveAttribute("aria-expanded", "true")
       expect(screen.getByText("pnpm lint")).toBeTruthy()
+      // Ended, its members end on the row that folds it.
+      expect(
+        screen.getByRole("button", { name: "Collapse 2 commands" })
+      ).toBeTruthy()
+    })
+
+    it("turns at the foot of its commands until the reply moves past it", () => {
+      // Its commands done but the group still the reply's last row: the next
+      // command may join it, so its foot keeps turning rather than flicking
+      // to the fold row and back between commands.
+      const footOf = () =>
+        document.querySelector<HTMLElement>(
+          '.activity-children > li[data-marker="working"], .activity-children > li[data-marker="foot"]'
+        )
+      const view = renderUi(
+        <Round parts={parts(live(DONE), true)} completed={false} />
+      )
+      expect(footOf()).toHaveAttribute("data-marker", "working")
+      // Waiting on the user — a question elsewhere — nothing is at work: the
+      // fold row instead.
+      view.rerender(
+        withProviders(
+          <Round parts={parts(live(DONE), true)} completed={false} />,
+          "question-elsewhere"
+        )
+      )
+      expect(footOf()).toHaveAttribute("data-marker", "foot")
     })
 
     it("slides its members shut, and lets them go once the slide has run", () => {
@@ -711,6 +837,106 @@ describe("a command group in a reply being written", () => {
         spy.mockRestore()
       }
     })
+
+    describe("with a command moved to the background still running in it", () => {
+      // codex-acp moves a long command to the background and never settles
+      // the call that launched it: the command runs on, its own row saying
+      // so, while the reply goes on past the group — and after it is done.
+      const BACKGROUNDED: ContentBlock[] = [
+        toolUse("c1", "Bash", { command: "pnpm lint" }),
+        toolResult("c1", "ok"),
+        {
+          ...toolUse(
+            "c2",
+            "Bash",
+            { command: "pnpm test" },
+            { jetbrains: { air: { asyncTasks: { backgrounded: true } } } }
+          ),
+          status: "in_progress",
+        } as ContentBlock,
+      ]
+      const THOUGHT: ContentBlock = {
+        type: "thinking",
+        text: "**Considering design options**",
+      }
+      /** The last of the group's members: the turning ring or the fold. */
+      const footOf = () =>
+        document.querySelector<HTMLElement>(
+          '.activity-children > li[data-marker="working"], .activity-children > li[data-marker="foot"]'
+        )
+      const fold = () =>
+        screen.getByRole("button", { name: "Collapse 2 commands" })
+
+      it("ends its members on the row that folds it, not the turning ring", () => {
+        renderUi(
+          <Round
+            parts={parts(live([...BACKGROUNDED, THOUGHT]), true)}
+            completed={false}
+          />
+        )
+        // Still running, it stays open, and its header says one runs.
+        expect(header()).toHaveAttribute("aria-expanded", "true")
+        expect(header()).toHaveAccessibleName(/^Running 2 commands/)
+        const member = rowOf("pnpm test")
+        expect(member).toHaveAttribute("data-status", "running")
+        expect(within(member).getByText("background")).toBeTruthy()
+        // A step follows it: no command joins it now.
+        expect(footOf()).toHaveAttribute("data-marker", "foot")
+        expect(within(footOf()!).getByRole("button")).toBe(fold())
+        expect(
+          document.querySelector('.activity-children > [data-marker="working"]')
+        ).toBeNull()
+      })
+
+      it("takes the running command in with the rest when it folds", () => {
+        renderUi(
+          <Round
+            parts={parts(live([...BACKGROUNDED, THOUGHT]), true)}
+            completed={false}
+          />
+        )
+        fireEvent.click(fold())
+        expect(header()).toHaveAttribute("aria-expanded", "false")
+        expect(screen.queryByText("pnpm lint")).toBeNull()
+        expect(screen.queryByText("pnpm test")).toBeNull()
+        expect(document.querySelector(".activity-children")).toBeNull()
+        // Its header still says one of them runs.
+        expect(rowOf("Running 2 commands")).toHaveAttribute(
+          "data-status",
+          "running"
+        )
+      })
+
+      it("turns at its foot, folded shows the command, while it is still the reply's last row", () => {
+        // Nothing after it yet: the next command may join it, and the one
+        // running is the step under way.
+        renderUi(
+          <Round parts={parts(live(BACKGROUNDED), true)} completed={false} />
+        )
+        expect(footOf()).toHaveAttribute("data-marker", "working")
+        fireEvent.click(header())
+        expect(rowOf("pnpm test")).toHaveAttribute("data-status", "running")
+        expect(screen.queryByText("pnpm lint")).toBeNull()
+      })
+
+      it("keeps the command in the group once the reply is done, even as its last row", () => {
+        for (const blocks of [
+          [...BACKGROUNDED, THOUGHT, { type: "text", text: "Done." }],
+          BACKGROUNDED,
+        ] as ContentBlock[][]) {
+          const view = renderUi(<Round parts={parts(live(blocks))} />)
+          // Folded by the reply being done, nothing under its header.
+          expect(header()).toHaveAttribute("aria-expanded", "false")
+          expect(screen.queryByText("pnpm test")).toBeNull()
+          // Opened, its members end on the fold, the command running in it.
+          fireEvent.click(header())
+          expect(rowOf("pnpm test")).toHaveAttribute("data-status", "running")
+          expect(footOf()).toHaveAttribute("data-marker", "foot")
+          view.unmount()
+          resetDisclosureStore()
+        }
+      })
+    })
   })
 
   it("folded, shows the member that needs the user under its header", () => {
@@ -726,6 +952,193 @@ describe("a command group in a reply being written", () => {
     expect(member.getAttribute("data-status")).toBe("awaiting")
     expect(within(member).getByText("needs you")).toBeTruthy()
     expect(screen.queryByText("pnpm lint")).toBeNull()
+  })
+})
+
+describe("an exploration group in a reply being written", () => {
+  const live = (blocks: ContentBlock[]): MessageTurn => ({
+    id: "t-explore",
+    role: "assistant",
+    timestamp: "2026-10-23T10:00:00Z",
+    blocks,
+  })
+  // Two reads made together, the second still going.
+  const READS: ContentBlock[] = [
+    toolUse("r1", "Read", { file_path: "/r/a.ts" }),
+    toolResult("r1", "a"),
+    toolUse("r2", "Read", { file_path: "/r/b.ts" }),
+  ]
+  const header = () => screen.getByRole("button", { name: /^Exploring/ })
+  // A member's row: the group's own carries its first member's key.
+  const read = (id: string) =>
+    document.querySelector<HTMLElement>(
+      `li.activity-child[data-step-key="tool:${id}"]`
+    )
+  const footOf = () =>
+    document.querySelector<HTMLElement>(
+      '.activity-children > li[data-marker="working"], .activity-children > li[data-marker="foot"]'
+    )
+
+  it("shows the read under way under its folded header while it is the reply's last row", () => {
+    renderUi(<Round parts={parts(live(READS), true)} completed={false} />)
+    expect(header()).toHaveAttribute("aria-expanded", "false")
+    expect(read("r2")).toHaveAttribute("data-status", "running")
+    expect(read("r1")).toBeNull()
+    fireEvent.click(header())
+    expect(footOf()).toHaveAttribute("data-marker", "working")
+  })
+
+  it("keeps a read still going inside once the reply has moved past it", () => {
+    // A command made alongside the reads follows them.
+    renderUi(
+      <Round
+        parts={parts(
+          live([...READS, toolUse("c9", "Bash", { command: "pnpm test" })]),
+          true
+        )}
+        completed={false}
+      />
+    )
+    expect(header()).toHaveAttribute("aria-expanded", "false")
+    expect(read("r2")).toBeNull()
+    // Opened, its members end on the fold: nothing joins it now.
+    fireEvent.click(header())
+    expect(read("r2")).toHaveAttribute("data-status", "running")
+    expect(footOf()).toHaveAttribute("data-marker", "foot")
+  })
+})
+
+describe("a failed command", () => {
+  const live = (blocks: ContentBlock[]): MessageTurn => ({
+    id: "t-failed",
+    role: "assistant",
+    timestamp: "2026-10-23T10:00:00Z",
+    blocks,
+  })
+  const FAILED = [
+    toolUse("c1", "Bash", { command: "pnpm lint" }),
+    toolResult("c1", "ok"),
+    toolUse("c2", "Bash", { command: "pnpm test" }),
+    toolResult(
+      "c2",
+      "1 failed, 47 passed\n[terminal exited: exit code: 1]",
+      true
+    ),
+  ]
+  const READ = toolUse("r1", "Read", { file_path: "/r/a.ts" })
+  const group = () =>
+    screen.getByRole("button", { name: /^(Ran|Running) 2 commands/ })
+
+  it("stays folded on its own while the reply is written, and once it is done", () => {
+    const LONE = [
+      toolUse("c1", "Bash", { command: "pnpm build" }),
+      toolResult("c1", "Type error\n[terminal exited: exit code: 2]", true),
+    ]
+    const view = renderUi(
+      <Round
+        parts={parts(live([...LONE, READ]), true, ["r1"])}
+        completed={false}
+      />
+    )
+    const row = rowOf("pnpm build")
+    expect(row.getAttribute("data-status")).toBe("failed")
+    expect(within(row).getByText("exit 2")).toBeTruthy()
+    expect(within(row).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "false"
+    )
+    expect(screen.queryByText(/Type error/)).toBeNull()
+    view.rerender(withProviders(<Round parts={parts(turn([...LONE, READ]))} />))
+    expect(within(rowOf("pnpm build")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "false"
+    )
+    expect(screen.queryByText(/Type error/)).toBeNull()
+  })
+
+  it("keeps its group open no longer than a passing one while the reply is written", () => {
+    const view = renderUi(
+      <Round parts={parts(live(FAILED), true)} completed={false} />
+    )
+    // Still the reply's last row: listed, the failed member folded in it.
+    expect(group()).toHaveAttribute("aria-expanded", "true")
+    expect(within(rowOf("pnpm test")).getByText("exit 1")).toBeTruthy()
+    expect(screen.queryByText(/1 failed, 47 passed/)).toBeNull()
+    // The reply moves past it: it folds, failure and all.
+    view.rerender(
+      withProviders(
+        <Round
+          parts={parts(live([...FAILED, READ]), true, ["r1"])}
+          completed={false}
+        />
+      )
+    )
+    expect(group()).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByText("pnpm test")).toBeNull()
+    // Its header still counts the failure, in red.
+    expect(within(group()).getByText("1 failed")).toHaveClass(
+      "text-tone-danger"
+    )
+  })
+
+  it("leaves its group folded in a reply read back from history", () => {
+    renderUi(<Round parts={parts(turn(FAILED))} />)
+    expect(group()).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByText("pnpm test")).toBeNull()
+  })
+})
+
+describe("the foot of a live reply", () => {
+  const LIVE = turn([
+    toolUse("c1", "Bash", { command: "pnpm lint" }),
+    toolResult("c1", "ok"),
+    toolUse("r1", "Read", { file_path: "/r/a.ts" }),
+  ])
+  const footOf = () =>
+    document.querySelector<HTMLElement>(".activity-timeline")!
+      .lastElementChild as HTMLElement
+  const working = () => document.querySelectorAll('[data-marker="working"]')
+
+  it("turns at the foot of the steps the answer is being written beneath, the reply's one turning mark", () => {
+    // The answer has started under the steps: the ring at their foot still
+    // turns, and nothing turns under the answer.
+    renderUi(<Round parts={parts(LIVE, true, ["r1"])} completed={false} />)
+    // Still being written: a character at a time, each its own span.
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.textContent === "Done." &&
+          ![...element.children].some((child) => child.textContent === "Done.")
+      )
+    ).toBeTruthy()
+    expect(footOf()).toHaveAttribute("data-marker", "working")
+    expect(footOf().querySelector(".animate-spin")).toBeTruthy()
+    expect(working()).toHaveLength(1)
+  })
+
+  it("rests on the fold row while the agent waits on the user", () => {
+    renderUi(
+      <Round parts={parts(LIVE, true, ["r1"])} completed={false} />,
+      "r1"
+    )
+    expect(footOf()).toHaveAttribute("data-marker", "foot")
+    console.log("FOOTTEXT", JSON.stringify(footOf().textContent))
+    expect(
+      within(footOf()).getByRole("button", { name: "Collapse 2 steps" })
+    ).toBeTruthy()
+    expect(working()).toHaveLength(0)
+  })
+
+  it("gives way to the turning mark under the reply once the steps fold", () => {
+    renderUi(<Round parts={parts(LIVE, true, ["r1"])} completed={false} />)
+    fireEvent.click(screen.getByRole("button", { name: "Working" }))
+    expect(document.querySelector(".activity-timeline > li")).toBeNull()
+    expect(working()).toHaveLength(1)
+    expect(working()[0]!.querySelector(".animate-spin")).toBeTruthy()
+    // Unfolded, the foot of the rail takes it back.
+    fireEvent.click(screen.getByRole("button", { name: "Working" }))
+    expect(footOf()).toHaveAttribute("data-marker", "working")
+    expect(working()).toHaveLength(1)
   })
 })
 
@@ -762,7 +1175,8 @@ describe("a reply's rail while it is written", () => {
     const group = rowOf("Ran 2 commands")
     expect(marked(group)).toBe("")
 
-    // A member joins the open group: its rail runs on from the last member.
+    // A member joins the open group, above the foot its members end on: its
+    // rail runs down to the foot, the member before keeps its own.
     view.rerender(
       withProviders(
         <Round
@@ -772,11 +1186,16 @@ describe("a reply's rail while it is written", () => {
       )
     )
     await act(async () => {})
-    expect(marked(rowOf("pnpm test"))).toBe("extend")
+    expect(marked(rowOf("pnpm test"))).toBe("")
     expect(marked(rowOf("pnpm build"))).toBe("enter")
     expect(marked(rowOf("pnpm lint"))).toBe("")
+    const members = rowOf("pnpm build").parentElement!
+    expect(members.lastElementChild).toHaveAttribute("data-marker", "working")
+    expect(rowOf("pnpm build").nextElementSibling).toBe(
+      members.lastElementChild
+    )
 
-    // A step joins the reply, above the turning mark the rail runs down to.
+    // A step joins the reply, above the turning ring the rail runs down to.
     view.rerender(
       withProviders(
         <Round
@@ -807,7 +1226,7 @@ describe("a reply's rail while it is written", () => {
 })
 
 describe("file rows", () => {
-  it("draw the file they read, write or edit in the label's light ink", () => {
+  it("draw the file they read, write or edit a step lighter than their verb", () => {
     renderUi(
       <Round
         parts={parts(
@@ -833,18 +1252,18 @@ describe("file rows", () => {
     )
 
     expect(screen.getByText("/repo/src/read.ts")).toHaveClass(
-      "text-muted-foreground"
+      "text-activity-secondary"
     )
     for (const name of ["made.ts", "changed.ts"]) {
       const label = screen.getByText(name)
       expect(label).not.toHaveClass("text-foreground")
-      expect(label.parentElement).toHaveClass("text-muted-foreground")
+      expect(label.parentElement).toHaveClass("text-activity-secondary")
     }
   })
 })
 
 describe("command row", () => {
-  it("draws its command line in the label's light ink, like a description", () => {
+  it("draws its label and its command line in one ink, like a description", () => {
     renderUi(
       <Round
         parts={parts(
@@ -862,9 +1281,140 @@ describe("command row", () => {
       />
     )
 
-    expect(screen.getByText("pnpm lint")).toHaveClass("text-muted-foreground")
+    expect(screen.getByText("pnpm lint")).toHaveClass("text-activity-secondary")
     expect(screen.getByText("Run the tests")).toHaveClass(
-      "text-muted-foreground"
+      "text-activity-secondary"
     )
+    for (const label of screen.getAllByText("Command")) {
+      expect(label).toHaveClass("text-activity-secondary", "font-medium")
+    }
+  })
+
+  it("darkens its words on hover or focus, as the fold row does", () => {
+    renderUi(
+      <Round
+        parts={parts(
+          turn([
+            toolUse("c1", "Bash", {
+              command: "pnpm test",
+              description: "Run the tests",
+            }),
+            toolResult("c1", "ok"),
+          ])
+        )}
+      />
+    )
+
+    // `.activity-row-toggle` (globals.css) takes the secondary ink inside the
+    // header that opens the row to the foreground.
+    const header = screen.getByText("Run the tests").closest("button")!
+    expect(header).toHaveAttribute("aria-expanded")
+    expect(header).toHaveClass("activity-row-toggle")
+    expect(within(header).getByText("Command")).toHaveClass(
+      "text-activity-secondary"
+    )
+    // So does the grey glyph in its ring, the row's marker beside it.
+    const marker = header.parentElement!.querySelector(
+      ":scope > .activity-marker"
+    )!
+    expect(marker.querySelector("svg")).toHaveAttribute("data-quiet")
+  })
+})
+
+describe("skill and to-do rows", () => {
+  it("set the label and what follows it in one ink", () => {
+    renderUi(
+      <Round
+        parts={parts(
+          turn([
+            toolUse("s1", "Skill", { skill: "brainstorming" }),
+            toolResult("s1", "ok"),
+            { type: "text", text: "Now the plan." },
+            toolUse("k1", "TaskCreate", { subject: "Fix the login form" }),
+            toolResult("k1", "ok"),
+          ])
+        )}
+      />
+    )
+    for (const text of [
+      "Skill",
+      "brainstorming",
+      "Updated todos",
+      "Fix the login form",
+    ]) {
+      expect(screen.getByText(text)).toHaveClass("text-activity-secondary")
+    }
+  })
+})
+
+describe("a command's exit", () => {
+  const EXITS = [
+    toolUse("n1", "Bash", { command: "rg -n source_bindings web/lib" }),
+    toolResult("n1", "Exit code 1", true),
+    { type: "text", text: "Nothing reads it there." },
+    toolUse("n2", "Bash", { command: "pyhton x.py" }),
+    toolResult(
+      "n2",
+      "Exit code 127\n(eval):1: command not found: pyhton",
+      true
+    ),
+    { type: "text", text: "Wrong name." },
+    toolUse("n3", "Bash", { command: "node crawl.js" }),
+    toolResult("n3", "Exit code 137", true),
+    { type: "text", text: "It was killed." },
+  ] satisfies ContentBlock[]
+
+  it("settles one that answered the command as done, saying the answer", () => {
+    renderUi(<Round parts={parts(turn(EXITS))} />)
+    const row = rowOf("rg -n source_bindings web/lib")
+    expect(row).toHaveAttribute("data-status", "succeeded")
+    const figure = within(row).getByText("no matches")
+    expect(figure).toHaveAttribute("title", "exit 1")
+    expect(figure).not.toHaveClass("text-tone-danger")
+    // Not counted with the failures in the reply's header.
+    expect(screen.getByText("2 failed")).toBeTruthy()
+  })
+
+  it("says a failure in the words its code stands for, the code on hover", () => {
+    renderUi(<Round parts={parts(turn(EXITS))} />)
+    const missing = rowOf("pyhton x.py")
+    expect(missing).toHaveAttribute("data-status", "failed")
+    const word = within(missing).getByText("command not found")
+    expect(word).toHaveClass("text-tone-danger")
+    expect(word).toHaveAttribute("title", "exit 127")
+    expect(
+      within(rowOf("node crawl.js")).getByText("killed · SIGKILL")
+    ).toHaveAttribute("title", "exit 137")
+  })
+})
+
+describe("a row's figure", () => {
+  it("takes the room past the label, which does not grow", () => {
+    renderUi(
+      <Round
+        parts={parts(
+          turn([
+            toolUse("e1", "Edit", {
+              file_path: "/repo/src/changed.ts",
+              old_string: "a",
+              new_string: "b\nc",
+            }),
+            toolResult("e1", "ok"),
+            { type: "text", text: "Then the lint." },
+            toolUse("c1", "Bash", { command: "pnpm lint" }),
+            toolResult("c1", "ok"),
+          ])
+        )}
+      />
+    )
+    // The dashed line to the figure is the figure's own (globals.css), so
+    // it is drawn only where there is a figure to reach.
+    const edit = within(rowOf("changed.ts")).getAllByRole("button")[0]!
+    const figure = edit.querySelector(".activity-figure")!
+    expect(figure).toHaveClass("grow", "justify-end")
+    expect(figure.previousElementSibling).not.toHaveClass("flex-1")
+    // A command with nothing to count leaves its figure empty: no line.
+    const command = within(rowOf("pnpm lint")).getAllByRole("button")[0]!
+    expect(command.querySelector(".activity-figure")).toBeEmptyDOMElement()
   })
 })

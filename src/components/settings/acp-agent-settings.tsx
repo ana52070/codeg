@@ -22,6 +22,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileText,
   GripVertical,
   Loader2,
   Minus,
@@ -29,10 +30,12 @@ import {
   Pencil,
   Plug,
   Plus,
+  Puzzle,
   RefreshCw,
   Save,
   Stethoscope,
   Trash2,
+  Undo2,
   Wrench,
 } from "lucide-react"
 import { parse as parseTomlDocument } from "smol-toml"
@@ -103,6 +106,7 @@ import {
   acpDeleteCustomAgent,
   acpUninstallAgent,
   acpUpdateAgentConfig,
+  acpUpdateClaudeModelPicker,
   acpUpdateAgentEnv,
   acpUpdateHermesConfig,
   acpRevealHermesHome,
@@ -110,6 +114,9 @@ import {
   codexPollDeviceCode,
   codexRequestDeviceCode,
   listModelProviders,
+  opencodeConnectKey,
+  opencodeDisconnectProvider,
+  opencodeListIntegrations,
   opencodeProviderCatalog,
 } from "@/lib/api"
 import type {
@@ -125,36 +132,70 @@ import type {
   HermesLocalConfig,
   ModelProviderInfo,
   OpenCodeCatalogProvider,
+  OpenCodeCredentialChange,
+  OpenCodeIntegration,
   PreflightResult,
 } from "@/lib/types"
 import {
   HERMES_PROVIDERS,
   parseClaudeProviderModel,
+  normalizeModelIds,
   parseCodexModelConfig,
   serializeCodexModelConfig,
   type CodexModelConfig,
 } from "@/lib/types"
 import { CodexModelListEditor } from "@/components/settings/codex-model-list-editor"
 import {
+  CodexSavePreview,
+  type CodexCatalogEndpoint,
+} from "@/components/settings/codex-catalog-source"
+import {
+  describeCodexSaveError,
+  type CodexCatalogTranslator,
+} from "@/lib/codex-catalog-error"
+import {
   OpenCodeConnectDialog,
   OpenCodeCustomProviderDialog,
+  type OpenCodeConnectRequest,
 } from "@/components/settings/opencode-connect-dialog"
 import { OpenCodeBehaviorSection } from "@/components/settings/opencode-behavior-section"
 import { OpenCodePermissionsSection } from "@/components/settings/opencode-permissions-section"
 import { AgentDiagnosticsDialog } from "@/components/settings/agent-diagnostics-dialog"
 import {
+  applyCustomProvider,
   buildConnectedModelOptions,
   buildConnectedProviders,
-  disconnectProvider,
   formatContextWindow,
-  modelReferencesProvider,
-  setProviderApiKey,
+  isProviderEnabled,
+  openCodeModelsProtocol,
+  providerBlockForEdit,
+  providerBlockModels,
+  readMainModel,
+  readProviderBlocks,
+  readSmallModel,
+  removeProviderFromConfig,
+  setMainModel,
+  setProviderBlockBaseUrl,
+  setProviderBlockName,
+  setProviderBlockNpm,
   setProviderEnabled,
+  setSmallModel,
+  setWellKnownBaseUrl,
+  type CustomProviderInput,
   type OpenCodeModelOptionGroup,
+  type OpenCodeProviderBlock,
 } from "@/lib/opencode-connect"
+import { parseJsoncObject, patchJsoncText } from "@/lib/jsonc-edit"
 import { toErrorMessage } from "@/lib/app-error"
 import { getInstallErrorHintKey } from "@/lib/agent-install-error"
 import { useAgentInstallStream } from "@/hooks/use-agent-install-stream"
+import { useProviderModels } from "@/hooks/use-provider-models"
+import { ClaudePickerModelsField } from "@/components/settings/claude-model-fields"
+import {
+  ModelIdInputWithFetch,
+  ModelIdListField,
+  ProviderModelsPicker,
+} from "@/components/settings/provider-models"
 import { OpencodePluginsModal } from "./opencode-plugins-modal"
 import {
   ANTIGRAVITY_ENV_KEYS,
@@ -173,10 +214,12 @@ import {
 import { CodeBuddyConfigPanel } from "./codebuddy-config-panel"
 import { CursorConfigPanel } from "./cursor-config-panel"
 import {
+  DEEPSEEK_DEFAULT_BASE_URL,
   DEEPSEEK_PANEL_ENV_KEYS,
   DeepSeekConfigPanel,
 } from "./deepseek-config-panel"
 import { DeepSeekModelListEditor } from "./deepseek-model-list-editor"
+import { MiniMaxCodeConfigPanel } from "./minimax-code-config-panel"
 import { KimiCodeConfigPanel } from "./kimi-code-config-panel"
 import { PiConfigPanel } from "./pi-config-panel"
 import { QoderConfigPanel } from "./qoder-config-panel"
@@ -196,6 +239,11 @@ type ClaudeAuthMode = (typeof CLAUDE_AUTH_MODES)[number]
 interface AgentDraft {
   enabled: boolean
   envText: string
+  systemInstructionsText: string
+  /** The instructions file's content when the draft was built (or last
+   *  saved): the shared save sends the text only when it differs, so an
+   *  untouched draft never writes the agent's file. */
+  systemInstructionsBaseline: string
   configText: string
   apiBaseUrl: string
   apiKey: string
@@ -252,10 +300,22 @@ interface AgentDraft {
   // default on (disabled).
   claudeSendAttributionHeader: boolean
   claudeDisableNonessentialTraffic: boolean
+  /** CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: Claude lists the gateway's
+   *  own Claude models. Any non-empty value turns it on, so off removes it. */
+  claudeGatewayDiscovery: boolean
+  /** The /model picker ids codeg adds while no provider is bound, and as
+   *  loaded: a save stores them only once they moved off it. */
+  claudePickerModels: string[]
+  claudePickerModelsBaseline: string[]
   codexAuthJsonText: string
   codexConfigTomlText: string
-  /** Structured codex custom-model list (mirrors the catalog source sidecar).
-   *  Drives the model editor + `model_catalog_json` generation on save. */
+  /** The config.toml text the draft was loaded from. Sent with a save, so the
+   *  backend can tell a hand edit of a key it manages (`model_catalog_json`,
+   *  root `model` while a catalog is published) from the disk changing. */
+  codexConfigTomlBaseline: string
+  /** Structured codex model list (mirrors the catalog source sidecar). The
+   *  backend publishes the catalog, `model_catalog_json` and root `model` from
+   *  it on save. */
   codexModelList: CodexModelConfig
   grokConfigTomlText: string
   // Grok authentication method (subscription via `grok login` vs XAI_API_KEY).
@@ -279,8 +339,11 @@ interface AgentDraft {
   // the levels are sent only once the chips moved off it.
   grokCustomReasoningEfforts: string[]
   grokCustomReasoningEffortsBaseline: string[]
+  /** The endpoint's other models codeg offers beside the managed one, and the
+   *  list as read: sent only once it moved off it. */
+  grokCustomExtraModels: string[]
+  grokCustomExtraModelsBaseline: string[]
   grokAutoCompactThreshold: string
-  openCodeAuthJsonText: string
   openClawGatewayUrl: string
   openClawGatewayToken: string
   openClawSessionKey: string
@@ -288,6 +351,10 @@ interface AgentDraft {
   clineApiKey: string
   clineModel: string
   clineBaseUrl: string
+  /** The ids of an OpenAI-compatible provider's `models.json` table: the only
+   *  models a Cline session can pick for it. `null` while the config names no
+   *  table, so a save leaves the one on disk as it is. */
+  clineModels: string[] | null
   // Hermes — `apiKey`/`model`/`apiBaseUrl` are reused for the active provider's
   // key, model.default, and model.base_url. These carry the rest.
   hermesProvider: string
@@ -321,7 +388,7 @@ type UiFixAction =
         | "upgrade_npx"
         | "uninstall_binary"
         | "uninstall_npx"
-        | "install_opencode_plugins"
+        | "manage_opencode_plugins"
         | "custom_install"
         | "upgrade_system"
         // Payload is the version to install, not the agent type.
@@ -357,7 +424,6 @@ const PACKAGE_ACTION_FIX_KINDS: ReadonlyArray<UiFixAction["kind"]> = [
   "uninstall_binary",
   "uninstall_npx",
   "redownload_binary",
-  "install_opencode_plugins",
   "custom_install",
   "upgrade_latest",
   "install_uv",
@@ -454,6 +520,41 @@ function parseEnvText(envText: string): Record<string, string> {
     map[key] = value
   }
   return map
+}
+
+/**
+ * Split an instructions file path into its directory (with the trailing
+ * separator) and file name, so the panel can elide the directory and keep the
+ * name in view. Handles both `/` and `\` separators.
+ */
+export function splitInstructionsPath(path: string): {
+  dir: string
+  name: string
+} {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))
+  return { dir: path.slice(0, cut + 1), name: path.slice(cut + 1) }
+}
+
+/**
+ * Re-read on refresh: the instructions file is often edited outside codeg (by
+ * hand, or by the agent's own CLI), so an untouched editor shows what is on
+ * disk now instead of the text it was first loaded with.
+ */
+export function rebaseSystemInstructionsDraft(
+  draft: AgentDraft,
+  agent: AcpAgentInfo
+): AgentDraft {
+  // An unsaved edit is kept as typed; an untouched editor follows the file.
+  if (draft.systemInstructionsText !== draft.systemInstructionsBaseline) {
+    return draft
+  }
+  const next = agent.system_instructions_content ?? ""
+  if (next === draft.systemInstructionsBaseline) return draft
+  return {
+    ...draft,
+    systemInstructionsText: next,
+    systemInstructionsBaseline: next,
+  }
 }
 
 /**
@@ -591,6 +692,41 @@ export function setHostToolsAgentMode(
   })
 }
 
+/**
+ * How Claude Code shows its thinking. Claude Code asks the API for
+ * `display: "updates"` by default, so a thinking block carries only the notes
+ * Claude writes between tool calls; `summarized` adds summaries of the
+ * reasoning itself. Display decides what comes back, not what is billed.
+ *
+ * claude-agent-acp (0.99.0 and later) reads this variable from ITS OWN
+ * environment, so it belongs in `env_json`, which is the adapter's launch env.
+ * The native settings.json `env` reaches only the Claude Code process the
+ * adapter starts, where the variable does nothing. An older adapter ignores it.
+ */
+const CLAUDE_THINKING_DISPLAY_ENV = "CLAUDE_CODE_THINKING_DISPLAY"
+const CLAUDE_THINKING_DISPLAY_SUMMARIZED = "summarized"
+
+/** Whether this agent's env draft asks Claude Code for thinking summaries. */
+export function claudeThinkingSummariesEnabled(envText: string): boolean {
+  return (
+    parseEnvText(envText)[CLAUDE_THINKING_DISPLAY_ENV] ===
+    CLAUDE_THINKING_DISPLAY_SUMMARIZED
+  )
+}
+
+/** Turn thinking summaries on, or remove the key so Claude Code's own default
+ *  applies again. */
+export function setClaudeThinkingSummaries(
+  envText: string,
+  enabled: boolean
+): string {
+  return patchEnvText(envText, {
+    [CLAUDE_THINKING_DISPLAY_ENV]: enabled
+      ? CLAUDE_THINKING_DISPLAY_SUMMARIZED
+      : undefined,
+  })
+}
+
 interface ImportantEnvKeys {
   apiBaseUrl: string[]
   apiKey: string[]
@@ -625,6 +761,13 @@ const CLAUDE_ENV_FLAG_OFF = "0"
 // telemetry / redundant pings" → default ON (disabled).
 const CLAUDE_SEND_ATTRIBUTION_HEADER_DEFAULT = false
 const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_DEFAULT = true
+// Claude Code asks `ANTHROPIC_BASE_URL` for `/v1/models` and adds the ids that
+// name Claude or Anthropic to /model. Read as set-or-not: "0" turns it on too.
+const CLAUDE_GATEWAY_DISCOVERY_ENV_KEY =
+  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+
+/** Where Gemini CLI goes with an API key and no base URL of its own. */
+const GEMINI_DEFAULT_API_BASE_URL = "https://generativelanguage.googleapis.com"
 
 const GEMINI_AUTH_MODES = [
   "custom",
@@ -692,6 +835,10 @@ const CLINE_SIGNIN_PROVIDERS = [
  * selection reaches `session/new` as an unknown provider with an empty model
  * list. The backend's `normalize_cline_provider_id` maps the legacy value on
  * read so an existing config still lands on the right row here. */
+/** The provider whose model ids live in Cline's `models.json`, mirroring the
+ *  backend's `CLINE_CUSTOM_MODEL_PROVIDER`. */
+const CLINE_CUSTOM_MODEL_PROVIDER = "openai-compatible"
+
 const CLINE_BYO_PROVIDERS = [
   { value: "anthropic", label: "Anthropic" },
   { value: "openai-native", label: "OpenAI" },
@@ -743,14 +890,17 @@ const GROK_UNSET = "__grok_unset__"
  * what Grok's own build models use; a BYO OpenAI-compatible proxy would pick
  * `chat_completions`, an Anthropic-format endpoint `messages`. */
 const GROK_DEFAULT_API_BACKEND = "responses"
+/** Where Grok goes for a custom model with no `base_url`. */
+const GROK_DEFAULT_BASE_URL = "https://api.x.ai/v1"
 
 /**
  * Reasoning-effort levels offered as chips for a Grok custom model's
  * `reasoning_efforts`. Each is one of Grok's canonical levels and reaches the
  * provider exactly as written. Unlike Kimi there is no free-text level: Grok
  * rejects an unknown one, and drops the model's WHOLE list with it (verified
- * against 1.0.62). `none` is left out because next to real levels it reads as
- * "declare none"; a hand-written one still shows as an extra chip.
+ * against 1.0.62, 1.0.70 and 1.0.77). `none` is left out because next to real
+ * levels it reads as "declare none"; a hand-written one still shows as an extra
+ * chip.
  */
 export const GROK_REASONING_EFFORT_LEVELS = [
   "minimal",
@@ -894,9 +1044,11 @@ export function importantEnvKeysByAgent(
     // ("设置后自动使用 PAT 认证" in the CLI package's own README) and the only
     // way to authenticate a headless/server/Docker install, where the
     // `qoder login` browser flow cannot run. `QODER_MODEL` is the env twin of
-    // `-m/--model`. Qoder talks only to its own service, so there is no
-    // endpoint var at all — an EMPTY list here hides that field rather than
-    // offering a box whose value nothing reads (see `importantFieldsFor`).
+    // `-m/--model`. There is no endpoint var at all: Qoder reaches models
+    // through its own service, and a key the account brings (BYOK, where
+    // Qoder allows it) is set up in Qoder itself — so an EMPTY list here hides
+    // that field rather than offering a box whose value nothing reads (see
+    // `importantFieldsFor`).
     // Generic OPENAI_*/API_KEY aliases are deliberately absent: Qoder reads
     // neither, and listing them would let the panel report "configured" off a
     // key that never reaches it. Mirrors the backend `agent_env_keys(Qoder)`.
@@ -931,6 +1083,11 @@ export function importantEnvKeysByAgent(
       model: [],
     }
   }
+  if (agentType === "minimax_code") {
+    // Reuse mcode's own configuration and authentication. Do not offer
+    // generic OpenAI fields that the native CLI does not consume.
+    return { apiBaseUrl: [], apiKey: [], model: [] }
+  }
   if (agentType === "command_code") {
     // Command Code's non-interactive sign-in is `COMMAND_CODE_API_KEY`, which
     // it reads ahead of the login `command-code login` stores. It talks only
@@ -955,8 +1112,8 @@ export function importantEnvKeysByAgent(
  * Which of the three generic env fields this agent actually has a variable for.
  *
  * An empty list in {@link importantEnvKeysByAgent} means "this agent reads no
- * env var for that slot" — Qoder, for instance, talks only to its own service
- * and has no endpoint override. Rendering the input anyway offers a box whose
+ * env var for that slot" — Qoder, for instance, has no endpoint override (a
+ * key the account brings is set up in Qoder, not passed in). Rendering the input anyway offers a box whose
  * value nothing will ever read, and (before `patchEnvByImportantKey` guarded
  * it) wrote the typed value to an env var literally named `undefined`.
  */
@@ -1005,58 +1162,6 @@ function parseConfigJsonText(configText: string): ConfigParseResult {
 function asObjectRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
   return value as Record<string, unknown>
-}
-
-function parseOpenCodeAuthJsonText(authJsonText: string): {
-  authObject: Record<string, unknown> | null
-  error: string | null
-} {
-  const trimmed = authJsonText.trim()
-  if (!trimmed) return { authObject: {}, error: null }
-  try {
-    const parsed = JSON.parse(trimmed) as unknown
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {
-        authObject: null,
-        error: acpText(
-          "errors.openCodeAuthMustBeObject",
-          "OpenCode auth.json must be a JSON object"
-        ),
-      }
-    }
-    return { authObject: parsed as Record<string, unknown>, error: null }
-  } catch (err) {
-    const message = toErrorMessage(err)
-    return {
-      authObject: null,
-      error: acpText(
-        "errors.openCodeAuthInvalid",
-        "OpenCode auth.json format error: {message}",
-        { message }
-      ),
-    }
-  }
-}
-
-function patchOpenCodeAuthJsonText(
-  authJsonText: string,
-  mutator: (authObject: Record<string, unknown>) => void
-): { authJsonText: string; recoveredFromInvalid: boolean } {
-  const parsed = parseOpenCodeAuthJsonText(authJsonText)
-  const authObject = parsed.error
-    ? {}
-    : (JSON.parse(JSON.stringify(parsed.authObject ?? {})) as Record<
-        string,
-        unknown
-      >)
-  mutator(authObject)
-  return {
-    authJsonText:
-      Object.keys(authObject).length === 0
-        ? ""
-        : JSON.stringify(authObject, null, 2),
-    recoveredFromInvalid: Boolean(parsed.error),
-  }
 }
 
 function envFromConfig(
@@ -1120,6 +1225,7 @@ function extractImportantConfigValues(
   claudeCustomModelOptionDescription: string
   claudeSendAttributionHeader: boolean
   claudeDisableNonessentialTraffic: boolean
+  claudeGatewayDiscovery: boolean
   configError: string | null
 } {
   const parseResult = parseConfigJsonText(configText)
@@ -1186,6 +1292,10 @@ function extractImportantConfigValues(
         : CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_DEFAULT
       : false
 
+  const claudeGatewayDiscovery =
+    agentType === "claude_code" &&
+    Boolean(findEnvValue(mergedEnv, [CLAUDE_GATEWAY_DISCOVERY_ENV_KEY]))
+
   return {
     apiBaseUrl: apiBaseUrl ?? "",
     apiKey: apiKey ?? "",
@@ -1209,6 +1319,7 @@ function extractImportantConfigValues(
       agentType === "claude_code" ? claudeCustomModelOptionDescription : "",
     claudeSendAttributionHeader,
     claudeDisableNonessentialTraffic,
+    claudeGatewayDiscovery,
     configError: parseResult.error,
   }
 }
@@ -1304,6 +1415,7 @@ interface ClineImportantValues {
   apiKey: string
   model: string
   baseUrl: string
+  models: string[] | null
 }
 
 /** Mirrors the backend `normalize_cline_provider_id`, so a legacy `"openai"`
@@ -1325,6 +1437,11 @@ function extractClineImportantValues(configText: string): ClineImportantValues {
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     model: typeof config.model === "string" ? config.model : "",
     baseUrl: typeof config.apiBaseUrl === "string" ? config.apiBaseUrl : "",
+    models: Array.isArray(config.models)
+      ? normalizeModelIds(
+          config.models.filter((id): id is string => typeof id === "string")
+        )
+      : null,
   }
 }
 
@@ -1644,29 +1761,15 @@ function normalizeConfigText(configText: string): string {
   return JSON.stringify(parseResult.config, null, 2)
 }
 
-interface OpenCodeProviderView {
-  id: string
-  name: string
-  api: string
-  npm: string
-  baseUrl: string
-  apiKey: string
+interface OpenCodeProviderView extends OpenCodeProviderBlock {
   modelCount: number
-  modelIds: string[]
-  models: Record<string, OpenCodeModelView>
-}
-
-interface OpenCodeModelView {
-  id: string
-  name: string
-  extraFieldCount: number
+  /** Whether this config lets OpenCode use the provider (`policies`). */
+  enabled: boolean
 }
 
 interface OpenCodeConfigView {
   model: string
   smallModel: string
-  enabledProviders: string[]
-  disabledProviders: string[]
   providerIds: string[]
   providers: Record<string, OpenCodeProviderView>
 }
@@ -1709,26 +1812,6 @@ const OPENCODE_PROVIDER_NPM_OPTIONS = [
     label: "@ai-sdk/deepseek",
   },
 ] as const
-
-function buildOpenCodeModelOptions(
-  config: OpenCodeConfigView | null
-): OpenCodeModelOptionGroup[] {
-  if (!config) return []
-  const groups: OpenCodeModelOptionGroup[] = []
-  for (const providerId of config.providerIds) {
-    const provider = config.providers[providerId]
-    if (!provider || provider.modelIds.length === 0) continue
-    groups.push({
-      providerId,
-      label: provider.name || providerId,
-      models: provider.modelIds.map((modelId) => ({
-        value: `${providerId}/${modelId}`,
-        label: modelId,
-      })),
-    })
-  }
-  return groups
-}
 
 function OpenCodeModelCombobox({
   value,
@@ -1826,120 +1909,57 @@ function buildOpenCodeNpmOptions(currentValue: string): string[] {
   return Array.from(next)
 }
 
-function extractOpenCodeConfigValues(
-  configText: string,
-  authJsonText: string
-): OpenCodeConfigView {
-  const parseResult = parseConfigJsonText(configText)
-  const config = parseResult.error ? {} : parseResult.config
-  const authParsed = parseOpenCodeAuthJsonText(authJsonText)
-  const authObject = authParsed.authObject ?? {}
-  const providerRoot = asObjectRecord(config.provider) ?? {}
-  const providerIds = Object.keys(providerRoot)
+/** The OpenCode config as the panel shows it. The file may hold comments and
+ *  1.x-shaped provider blocks; see `src/lib/opencode-connect.ts`. A document
+ *  that does not parse reads as empty — the structured editors then refuse to
+ *  write (see `patchOpenCodeConfigText`). */
+function extractOpenCodeConfigValues(configText: string): OpenCodeConfigView {
+  const config = parseJsoncObject(configText).value ?? {}
+  const blocks = readProviderBlocks(config)
+  const providerIds = Object.keys(blocks)
   const providers: Record<string, OpenCodeProviderView> = {}
-  const knownModelKeys = new Set(["id", "name"])
-
-  for (const providerId of providerIds) {
-    const rawProvider = asObjectRecord(providerRoot[providerId]) ?? {}
-    const options = asObjectRecord(rawProvider.options) ?? {}
-    const models = asObjectRecord(rawProvider.models) ?? {}
-    const modelIds = Object.keys(models)
-    const providerModels: Record<string, OpenCodeModelView> = {}
-    for (const modelId of modelIds) {
-      const rawModel = asObjectRecord(models[modelId]) ?? {}
-      providerModels[modelId] = {
-        // OpenCode uses `provider.models.<model_id>` as the true model id.
-        id: modelId,
-        name:
-          pickFirstString(rawModel, ["name"]) ??
-          pickFirstString(rawModel, ["id"]) ??
-          "",
-        extraFieldCount: Object.keys(rawModel).filter(
-          (key) => !knownModelKeys.has(key)
-        ).length,
-      }
-    }
-    const authEntry = asObjectRecord(authObject[providerId]) ?? {}
-    const authKey = pickFirstString(authEntry, ["key"]) ?? ""
-    providers[providerId] = {
-      id: providerId,
-      name: pickFirstString(rawProvider, ["name"]) ?? "",
-      api: pickFirstString(rawProvider, ["api"]) ?? "",
-      npm: pickFirstString(rawProvider, ["npm"]) ?? "",
-      baseUrl: pickFirstString(options, ["baseURL", "baseUrl"]) ?? "",
-      apiKey: pickFirstString(options, ["apiKey", "api_key"]) ?? authKey,
-      modelCount: modelIds.length,
-      modelIds,
-      models: providerModels,
+  for (const id of providerIds) {
+    providers[id] = {
+      ...blocks[id],
+      modelCount: blocks[id].modelIds.length,
+      enabled: isProviderEnabled(config, id),
     }
   }
-
   return {
-    model: pickFirstString(config, ["model"]) ?? "",
-    smallModel:
-      pickFirstString(config, ["small_model", "smallModel", "small-model"]) ??
-      "",
-    enabledProviders: Array.isArray(config.enabled_providers)
-      ? config.enabled_providers
-          .filter((item): item is string => typeof item === "string")
-          .map((item) => item.trim())
-          .filter(Boolean)
-      : [],
-    disabledProviders: Array.isArray(config.disabled_providers)
-      ? config.disabled_providers
-          .filter((item): item is string => typeof item === "string")
-          .map((item) => item.trim())
-          .filter(Boolean)
-      : [],
+    model: readMainModel(config),
+    smallModel: readSmallModel(config),
     providerIds,
     providers,
   }
 }
 
+/** The models of an existing OpenCode provider block (either shape), or null
+ *  when the config declares no such block or it lists no models. */
+function existingBlockModels(
+  config: Record<string, unknown>,
+  providerId: string
+): Record<string, unknown> | null {
+  const native = asObjectRecord(asObjectRecord(config.providers)?.[providerId])
+  const block =
+    native ?? asObjectRecord(asObjectRecord(config.provider)?.[providerId])
+  return block ? asObjectRecord(block.models) : null
+}
+
+/**
+ * Apply a structured change to OpenCode's config text, keeping the user's
+ * comments and formatting outside the changed keys. Text that does not parse
+ * is never replaced: the change is refused with the parse error, for the raw
+ * editor to fix.
+ */
 function patchOpenCodeConfigText(
   configText: string,
   mutator: (config: Record<string, unknown>) => void
-): {
-  configText: string
-  recoveredFromInvalid: boolean
-} {
-  const parseResult = parseConfigJsonText(configText)
-  const config = parseResult.error
-    ? {}
-    : (JSON.parse(JSON.stringify(parseResult.config)) as Record<
-        string,
-        unknown
-      >)
-  mutator(config)
-  return {
-    configText:
-      Object.keys(config).length === 0 ? "" : JSON.stringify(config, null, 2),
-    recoveredFromInvalid: Boolean(parseResult.error),
+): { configText: string; error: string | null } {
+  try {
+    return { configText: patchJsoncText(configText, mutator), error: null }
+  } catch (err) {
+    return { configText, error: toErrorMessage(err) }
   }
-}
-
-// Fill in `provider.<id>.npm` with the first option for any providers that
-// lack it, so the displayed Select value matches what gets persisted to disk.
-function ensureOpenCodeProviderNpm(configText: string): string {
-  if (!configText.trim()) return configText
-  const parseResult = parseConfigJsonText(configText)
-  if (parseResult.error) return configText
-  const config = parseResult.config
-  const providerRoot = asObjectRecord(config.provider)
-  if (!providerRoot) return configText
-  let mutated = false
-  for (const providerId of Object.keys(providerRoot)) {
-    const provider = asObjectRecord(providerRoot[providerId])
-    if (!provider) continue
-    const currentNpm =
-      typeof provider.npm === "string" ? provider.npm.trim() : ""
-    if (!currentNpm) {
-      provider.npm = OPENCODE_PROVIDER_NPM_OPTIONS[0].value
-      mutated = true
-    }
-  }
-  if (!mutated) return configText
-  return JSON.stringify(config, null, 2)
 }
 
 interface CodexTomlImportantValues {
@@ -1963,19 +1983,39 @@ interface CodexImportantValues {
 
 const CODEX_DEFAULT_MODEL_PROVIDER = "codeg"
 
+/** `text` with root `model` as `baseline` has it; untouched when the two
+ *  already agree, so formatting and comments stay. */
+function withRootModelOf(text: string, baseline: string): string {
+  const loaded = extractCodexTomlImportantValues(baseline).model
+  return extractCodexTomlImportantValues(text).model === loaded
+    ? text
+    : updateTomlRootStringKey(text, "model", loaded)
+}
+
+/** Whether codeg publishes a catalog for this list, and so owns
+ *  `model_catalog_json` and root `model` in config.toml. */
+function codexListIsManaged(list: CodexModelConfig): boolean {
+  return (
+    list.customs.length > 0 ||
+    (list.excludedOfficials?.length ?? 0) > 0 ||
+    !!list.catalog
+  )
+}
+
 /**
- * Provider ids codex builds in (codex 0.160.1, `built_in_model_providers` in
+ * Provider ids codex builds in (codex 0.165.0, `built_in_model_providers` in
  * the `model-provider-info` crate); `openai` is the one an Official
  * Subscription (ChatGPT login) session runs on. A `[model_providers.<id>]`
  * table for one of them does not change it: `merge_configured_model_providers`
- * keeps the built-in entry, except that the two Bedrock ids accept a few
- * fields — and reject the whole config if any other field,
- * `supports_websockets` included, is set.
+ * keeps the built-in entry, except that the two Bedrock ids and `gcp` (Google
+ * Cloud Vertex AI, new in 0.165) accept a few fields — and reject the whole
+ * config if any other field, `supports_websockets` included, is set.
  */
 const CODEX_BUILT_IN_PROVIDER_IDS: ReadonlySet<string> = new Set([
   "openai",
   "amazon-bedrock",
   "amazon-bedrock-runtime",
+  "gcp",
   "ollama",
   "lmstudio",
 ])
@@ -2052,19 +2092,26 @@ const CODEX_SANDBOX_UNSET = ""
  * through the widget under this sentinel and is mapped back on change. */
 const CODEX_SANDBOX_UNSET_OPTION = "__codex_unset__"
 
-/** `approval_policy` choices. The three presets are `AskForApproval`'s plain
- * string variants; `granular` is its table variant and reveals five switches.
- * (`on-failure` is only a legacy serde alias of `on-request` upstream, so it is
- * normalized away by the backend rather than offered here.) */
+/** `approval_policy` choices. The two presets are `AskForApproval`'s plain
+ * string variants codex still accepts; `granular` is its table variant and
+ * reveals five switches. (`on-failure` is only a legacy serde alias of
+ * `on-request` upstream, so it is normalized away by the backend rather than
+ * offered here.) */
 const CODEX_APPROVAL_POLICY_VALUES = [
   "on-request",
-  "untrusted",
   "never",
   "granular",
 ] as const
+
+/** The string variant codex retired: a config.toml carrying it makes codex
+ * refuse to load its config, so no Codex session starts. Never offered; shown
+ * only when config.toml already has it, so the user can see it has to go. */
+const CODEX_RETIRED_APPROVAL_POLICY = "untrusted"
+
 type CodexApprovalPolicyChoice =
   | typeof CODEX_SANDBOX_UNSET
   | (typeof CODEX_APPROVAL_POLICY_VALUES)[number]
+  | typeof CODEX_RETIRED_APPROVAL_POLICY
 
 /** `SandboxMode`'s complete upstream vocabulary. */
 const CODEX_SANDBOX_MODE_VALUES = [
@@ -2817,22 +2864,6 @@ function findTomlKeyInRange(
   return -1
 }
 
-function removeTomlSection(
-  configTomlText: string,
-  sectionName: string
-): string {
-  const lines = configTomlText.split(/\r?\n/)
-  const range = findTomlSectionRange(lines, sectionName)
-  if (!range) return configTomlText
-  // Remove blank line before section header if present
-  const removeStart =
-    range.start > 0 && lines[range.start - 1].trim() === ""
-      ? range.start - 1
-      : range.start
-  lines.splice(removeStart, range.end - removeStart)
-  return lines.join("\n").trim()
-}
-
 /**
  * Drop any ROOT-level `<section>.<key> = …` line — the dotted spelling of the
  * very key this upsert is about to write into `[section]`.
@@ -3392,6 +3423,8 @@ export function buildGrokStructuredConfig(draft: {
   grokCustomContextWindow: string
   grokCustomReasoningEfforts: string[]
   grokCustomReasoningEffortsBaseline: string[]
+  grokCustomExtraModels?: string[]
+  grokCustomExtraModelsBaseline?: string[]
   grokAutoCompactThreshold: string
 }): GrokStructuredConfig {
   // The custom-model group applies only in the `custom` auth method; the
@@ -3410,7 +3443,17 @@ export function buildGrokStructuredConfig(draft: {
     const n = Number.parseInt(trimmed, 10)
     return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : null
   }
+  // Likewise only once the list moved; left out, the extras codeg added stay.
+  const extrasMoved =
+    modelId &&
+    !sameModelIds(
+      draft.grokCustomExtraModels ?? [],
+      draft.grokCustomExtraModelsBaseline ?? []
+    )
   return {
+    ...(extrasMoved
+      ? { customExtraModels: draft.grokCustomExtraModels ?? [] }
+      : {}),
     permissionMode: draft.grokPermissionMode || null,
     defaultReasoningEffort: draft.grokReasoningEffort || null,
     customModelId: modelId || null,
@@ -3463,6 +3506,8 @@ export function buildGrokSaveOptions(
     grokCustomContextWindow: string
     grokCustomReasoningEfforts: string[]
     grokCustomReasoningEffortsBaseline: string[]
+    grokCustomExtraModels?: string[]
+    grokCustomExtraModelsBaseline?: string[]
     grokAutoCompactThreshold: string
     grokConfigTomlText: string
   },
@@ -3630,10 +3675,16 @@ export function configTextForClaudeSave(
  * written explicitly ("1"/"0") rather than left implicit/absent. Pure — shared
  * by the toggle handler, the save path, and tests.
  */
+/** The same ids in the same order. */
+export function sameModelIds(a: readonly string[], b: readonly string[]) {
+  return a.length === b.length && a.every((id, i) => id === b[i])
+}
+
 export function setClaudeEnvFlagInConfigText(
   configText: string,
   envKey: string,
-  value: string
+  /** `null` removes the key. */
+  value: string | null
 ): { configText: string; recoveredFromInvalid: boolean } {
   const parseResult = parseConfigJsonText(configText)
   const config: Record<string, unknown> = parseResult.error
@@ -3643,8 +3694,16 @@ export function setClaudeEnvFlagInConfigText(
     typeof config.env === "object" && config.env && !Array.isArray(config.env)
       ? { ...(config.env as Record<string, unknown>) }
       : {}
-  env[envKey] = value
-  config.env = env
+  if (value === null) {
+    delete env[envKey]
+  } else {
+    env[envKey] = value
+  }
+  if (Object.keys(env).length === 0) {
+    delete config.env
+  } else {
+    config.env = env
+  }
   return {
     configText: JSON.stringify(config, null, 2),
     recoveredFromInvalid: Boolean(parseResult.error),
@@ -3804,7 +3863,6 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
       : ""
   const hermesValues =
     agent.agent_type === "hermes" ? parseHermesConfig(configText) : null
-  const openCodeAuthJsonText = agent.opencode_auth_json ?? ""
   const codexAuthJsonText = agent.codex_auth_json ?? ""
   // Exactly what is on disk. The draft used to force
   // `disable_response_storage = true` in here, so every save wrote it back.
@@ -3851,10 +3909,7 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
     codexAuthJsonText,
     codexConfigTomlText
   )
-  const openCodeImportant = extractOpenCodeConfigValues(
-    configText,
-    openCodeAuthJsonText
-  )
+  const openCodeImportant = extractOpenCodeConfigValues(configText)
   const clineImportant = extractClineImportantValues(configText)
   const codexAuthMode: CodexAuthMode =
     agent.agent_type === "codex" && agent.model_provider_id != null
@@ -3889,6 +3944,8 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
   return {
     enabled: agent.enabled,
     envText,
+    systemInstructionsText: agent.system_instructions_content ?? "",
+    systemInstructionsBaseline: agent.system_instructions_content ?? "",
     configText,
     apiBaseUrl:
       agent.agent_type === "hermes"
@@ -3958,8 +4015,12 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
     claudeSendAttributionHeader: important.claudeSendAttributionHeader,
     claudeDisableNonessentialTraffic:
       important.claudeDisableNonessentialTraffic,
+    claudeGatewayDiscovery: important.claudeGatewayDiscovery,
+    claudePickerModels: agent.claude_model_picker ?? [],
+    claudePickerModelsBaseline: agent.claude_model_picker ?? [],
     codexAuthJsonText,
     codexConfigTomlText,
+    codexConfigTomlBaseline: codexConfigTomlText,
     codexModelList: parseCodexModelConfig(agent.codex_model_catalog ?? null),
     grokConfigTomlText,
     grokAuthMode,
@@ -3978,11 +4039,13 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
       agent.grok_settings?.custom_reasoning_efforts ?? [],
     grokCustomReasoningEffortsBaseline:
       agent.grok_settings?.custom_reasoning_efforts ?? [],
+    grokCustomExtraModels: agent.grok_settings?.custom_extra_models ?? [],
+    grokCustomExtraModelsBaseline:
+      agent.grok_settings?.custom_extra_models ?? [],
     grokAutoCompactThreshold:
       agent.grok_settings?.auto_compact_threshold_percent != null
         ? String(agent.grok_settings.auto_compact_threshold_percent)
         : "",
-    openCodeAuthJsonText,
     openClawGatewayUrl: openClawImportant.gatewayUrl,
     openClawGatewayToken: openClawImportant.gatewayToken,
     openClawSessionKey: openClawImportant.sessionKey,
@@ -3990,6 +4053,7 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
     clineApiKey: clineImportant.apiKey,
     clineModel: clineImportant.model,
     clineBaseUrl: clineImportant.baseUrl,
+    clineModels: clineImportant.models,
     hermesProvider: hermesValues?.provider ?? "openrouter",
     hermesConfigYaml: agent.hermes_config_yaml ?? "",
     hermesHome: hermesValues?.hermesHome ?? "",
@@ -4052,6 +4116,21 @@ function hasComparableVersion(
   value: string | null | undefined
 ): value is string {
   return Boolean(value && /\d/.test(value) && value.includes("."))
+}
+
+/**
+ * Whether an installed OpenCode is a 1.x (or older) release, which codeg no
+ * longer launches — mirror of `is_pre_v2_release` in the backend's
+ * `opencode_launch.rs`. Only a release is judged: opencode's preview channels
+ * publish as `0.0.0-<tag>` whatever the build's age, and an unparsable version
+ * says nothing, so neither is flagged.
+ */
+export function isOpenCodeV1Release(version: string): boolean {
+  const match = SEMVER_PATTERN.exec(version.trim())
+  if (!match) return false
+  const [major, minor, patch] = [match[1], match[2], match[3]].map(Number)
+  if (major === 0 && minor === 0 && patch === 0) return false
+  return major < 2
 }
 
 // Mirror of the backend `sanitize_custom_version`: a custom install version
@@ -4575,6 +4654,39 @@ export function buildVersionCheck(
     }
   }
 
+  // codeg runs OpenCode 2 and refuses a 1.x build at launch (the backend's
+  // `opencode_launch`), so a 1.x install is not merely behind: no session opens
+  // until it is upgraded. Say so instead of offering the upgrade as optional.
+  if (
+    agent.agent_type === "open_code" &&
+    hasComparableVersion(agent.installed_version) &&
+    isOpenCodeV1Release(agent.installed_version)
+  ) {
+    return {
+      check_id: "version_status",
+      label: acpText("version.statusLabel", "Version Status"),
+      status: "fail",
+      message: acpText(
+        "version.openCodeV1Unsupported",
+        "{versionText}. OpenCode 1.x is no longer supported: Codeg now runs OpenCode 2. Upgrade to open sessions.",
+        { versionText }
+      ),
+      fixes: [
+        {
+          label: acpText("actions.upgrade", "Upgrade"),
+          kind: upgradeAction,
+          payload: agent.agent_type,
+        },
+        {
+          label: acpText("actions.uninstall", "Uninstall"),
+          kind: uninstallAction,
+          payload: agent.agent_type,
+        },
+      ],
+      footerFixes,
+    }
+  }
+
   if (
     hasComparableVersion(agent.registry_version) &&
     hasComparableVersion(agent.installed_version) &&
@@ -4765,6 +4877,9 @@ export function AcpAgentSettings() {
   const ime = useImeGuard()
   const locale = useLocale()
   const t = useTranslations("AcpAgentSettings")
+  const tCatalogScoped = useTranslations("CodexModelEditor.catalogSource")
+  const tCatalog = tCatalogScoped as unknown as CodexCatalogTranslator
+  const tModels = useTranslations("ProviderModels")
   const rawTranslator = t as unknown as AcpTranslator
   acpTranslator = (key, values) => rawTranslator(key, values)
   const searchParams = useSearchParams()
@@ -4795,6 +4910,9 @@ export function AcpAgentSettings() {
     Partial<Record<AgentType, boolean>>
   >({})
   const [savingConfig, setSavingConfig] = useState<
+    Partial<Record<AgentType, boolean>>
+  >({})
+  const [savingInstructions, setSavingInstructions] = useState<
     Partial<Record<AgentType, boolean>>
   >({})
   const [modelProviders, setModelProviders] = useState<ModelProviderInfo[]>([])
@@ -4879,6 +4997,22 @@ export function AcpAgentSettings() {
   const [openCodeEditProviderId, setOpenCodeEditProviderId] = useState<
     string | null
   >(null)
+  // OpenCode's integrations as OpenCode reports them (see
+  // `opencodeListIntegrations`); empty until loaded or when it is not
+  // installed.
+  const [openCodeIntegrations, setOpenCodeIntegrations] = useState<
+    OpenCodeIntegration[]
+  >([])
+  const [openCodeIntegrationsLoading, setOpenCodeIntegrationsLoading] =
+    useState(false)
+  const [openCodeIntegrationsError, setOpenCodeIntegrationsError] = useState<
+    string | null
+  >(null)
+  const openCodeIntegrationsRequestedRef = useRef(false)
+  // The provider a credential change is in flight for, so its row can show it.
+  const [openCodeCredentialBusy, setOpenCodeCredentialBusy] = useState<
+    string | null
+  >(null)
   const [dragging, setDragging] = useState<AgentType | null>(null)
   const [reordering, setReordering] = useState(false)
   const pendingOrderRef = useRef<AgentType[] | null>(null)
@@ -4951,6 +5085,13 @@ export function AcpAgentSettings() {
           const existing = updated[agent.agent_type]
           if (agent.agent_type === "deepseek" && existing) {
             updated[agent.agent_type] = rebaseDeepSeekDraft(existing, agent)
+          }
+          const current = updated[agent.agent_type]
+          if (current) {
+            updated[agent.agent_type] = rebaseSystemInstructionsDraft(
+              current,
+              agent
+            )
           }
         }
         return updated
@@ -5115,8 +5256,13 @@ export function AcpAgentSettings() {
     handledSearchAgentRef.current = requestedAgentType
   }, [requestedAgentType, sortedAgents])
 
+  // Bring the selected agent into view when the selection changes, and again
+  // when a reload returns the list: it is unmounted while agents load and
+  // comes back scrolled to the top. Changes to the list itself must not
+  // scroll it — a drag reorders the agents on every row it passes, and
+  // following the selected agent then pulls the list away from the pointer.
   useEffect(() => {
-    if (!selectedAgentType) return
+    if (loadingAgents || !selectedAgentType) return
     const container = agentListRef.current
     if (!container) return
     const selected = container.querySelector<HTMLElement>(
@@ -5124,7 +5270,7 @@ export function AcpAgentSettings() {
     )
     if (!selected) return
     selected.scrollIntoView({ block: "nearest", behavior: "smooth" })
-  }, [selectedAgentType, sortedAgents])
+  }, [loadingAgents, selectedAgentType])
 
   useEffect(() => {
     if (sortedAgents.length === 0) {
@@ -5267,23 +5413,86 @@ export function AcpAgentSettings() {
     [reportAffectedSessions]
   )
 
+  // The file now holds `content`: an editor still showing it is clean again,
+  // and one the user kept typing in stays dirty against the new baseline.
+  const markSystemInstructionsSaved = useCallback(
+    (agentType: AgentType, content: string) => {
+      setDrafts((prev) => {
+        const draft = prev[agentType]
+        if (!draft || draft.systemInstructionsBaseline === content) return prev
+        return {
+          ...prev,
+          [agentType]: { ...draft, systemInstructionsBaseline: content },
+        }
+      })
+    },
+    []
+  )
+
+  const persistSystemInstructions = useCallback(
+    async (
+      agentType: AgentType,
+      content: string,
+      filePath: string | null | undefined
+    ) => {
+      setSavingInstructions((prev) => ({ ...prev, [agentType]: true }))
+      try {
+        const affected = await acpUpdateAgentConfig(agentType, {
+          system_instructions_content: content,
+          system_instructions_file_path: filePath ?? null,
+        })
+        reportAffectedSessions(affected)
+        setAgents((prev) =>
+          prev.map((agent) =>
+            agent.agent_type === agentType
+              ? {
+                  ...agent,
+                  system_instructions_content: content,
+                }
+              : agent
+          )
+        )
+        markSystemInstructionsSaved(agentType, content)
+        toast.success(t("toasts.systemInstructionsSaved"), {
+          description: t("toasts.configSavedHint"),
+        })
+      } catch (err) {
+        console.error("[Settings] save system instructions failed:", err)
+        const message = toErrorMessage(err)
+        toast.error(t("toasts.saveSystemInstructionsFailed"), {
+          description: message,
+        })
+      } finally {
+        setSavingInstructions((prev) => ({ ...prev, [agentType]: false }))
+      }
+    },
+    [markSystemInstructionsSaved, reportAffectedSessions, t]
+  )
+
   const persistConfig = useCallback(
     async (
       agentType: AgentType,
       configText: string,
       options?: {
-        openCodeAuthJsonText?: string
+        systemInstructionsText?: string
+        systemInstructionsFilePath?: string
         codexAuthJsonText?: string
         codexConfigTomlText?: string
+        codexConfigTomlBaseline?: string
         codexModelCatalog?: string
         codexSandbox?: CodexSandboxStructuredConfig
         grokConfigTomlText?: string
         grokStructured?: GrokStructuredConfig
       }
     ) => {
-      const parsedConfig = parseConfigJsonText(configText)
-      if (parsedConfig.error) {
-        throw new Error(parsedConfig.error)
+      // OpenCode's config is JSONC and is sent as written (comments and all);
+      // every other agent's is strict JSON.
+      const parseError =
+        agentType === "open_code"
+          ? parseJsoncObject(configText).error
+          : parseConfigJsonText(configText).error
+      if (parseError) {
+        throw new Error(parseError)
       }
       const codexAuthJsonText = options?.codexAuthJsonText
       if (agentType === "codex" && typeof codexAuthJsonText === "string") {
@@ -5292,10 +5501,12 @@ export function AcpAgentSettings() {
           throw new Error(authError)
         }
       }
-      let normalizedConfig = normalizeConfigText(configText)
-      if (agentType === "open_code" && normalizedConfig) {
-        normalizedConfig = ensureOpenCodeProviderNpm(normalizedConfig)
-      }
+      const normalizedConfig =
+        agentType === "open_code"
+          ? configText.trim()
+            ? configText
+            : ""
+          : normalizeConfigText(configText)
       // For agents using merge strategy, mark removed keys as null
       // so the backend merge_json_values can delete them from disk.
       let configForPersist =
@@ -5316,15 +5527,21 @@ export function AcpAgentSettings() {
       try {
         const affected = await acpUpdateAgentConfig(agentType, {
           config_json: configForPersist || null,
-          opencode_auth_json:
-            typeof options?.openCodeAuthJsonText === "string"
-              ? options.openCodeAuthJsonText
+          system_instructions_content:
+            typeof options?.systemInstructionsText === "string"
+              ? options.systemInstructionsText
               : null,
+          system_instructions_file_path:
+            options?.systemInstructionsFilePath ?? null,
           codex_auth_json:
             typeof codexAuthJsonText === "string" ? codexAuthJsonText : null,
           codex_config_toml:
             typeof options?.codexConfigTomlText === "string"
               ? options.codexConfigTomlText
+              : null,
+          codex_config_toml_baseline:
+            typeof options?.codexConfigTomlBaseline === "string"
+              ? options.codexConfigTomlBaseline
               : null,
           codex_model_catalog:
             typeof options?.codexModelCatalog === "string"
@@ -5344,10 +5561,10 @@ export function AcpAgentSettings() {
               ? {
                   ...agent,
                   config_json: normalizedConfig || null,
-                  opencode_auth_json:
-                    typeof options?.openCodeAuthJsonText === "string"
-                      ? options.openCodeAuthJsonText
-                      : agent.opencode_auth_json,
+                  system_instructions_content:
+                    typeof options?.systemInstructionsText === "string"
+                      ? options.systemInstructionsText
+                      : agent.system_instructions_content,
                   codex_auth_json:
                     typeof codexAuthJsonText === "string"
                       ? codexAuthJsonText
@@ -5390,11 +5607,14 @@ export function AcpAgentSettings() {
               : agent
           )
         )
+        if (typeof options?.systemInstructionsText === "string") {
+          markSystemInstructionsSaved(agentType, options.systemInstructionsText)
+        }
       } finally {
         setSavingConfig((prev) => ({ ...prev, [agentType]: false }))
       }
     },
-    [agents, reportAffectedSessions]
+    [agents, markSystemInstructionsSaved, reportAffectedSessions]
   )
 
   // After a Grok save, re-read the merged on-disk config and rebuild the Grok
@@ -5402,21 +5622,31 @@ export function AcpAgentSettings() {
   // drafts (to preserve in-progress edits), so without this the collapsed raw
   // editor and the structured dropdowns could drift out of sync with disk (the
   // structured merge and the raw editor each write keys the other doesn't echo).
-  const reseedAgentDraft = useCallback(async (agentType: AgentType) => {
-    try {
-      const fresh = await acpListAgents()
-      setAgents(fresh)
-      publishAgentDisplay(fresh)
-      const agent = fresh.find((a) => a.agent_type === agentType)
-      if (agent) {
-        setDrafts((prev) => ({ ...prev, [agentType]: buildAgentDraft(agent) }))
+  const reseedAgentDraft = useCallback(
+    async (agentType: AgentType, onlyIfStill?: AgentDraft) => {
+      try {
+        const fresh = await acpListAgents()
+        setAgents(fresh)
+        publishAgentDisplay(fresh)
+        const agent = fresh.find((a) => a.agent_type === agentType)
+        if (agent) {
+          // `onlyIfStill`: the draft a save submitted. An edit made while the
+          // save was in flight replaced it, and is kept — with the draft's own
+          // baseline, which still matches its text.
+          setDrafts((prev) =>
+            onlyIfStill && prev[agentType] && prev[agentType] !== onlyIfStill
+              ? prev
+              : { ...prev, [agentType]: buildAgentDraft(agent) }
+          )
+        }
+      } catch (err) {
+        // Non-fatal: the save already committed, and the agents-updated
+        // subscription will resync shortly — never surface this as a save failure.
+        console.error(`[Settings] reseed ${agentType} draft failed:`, err)
       }
-    } catch (err) {
-      // Non-fatal: the save already committed, and the agents-updated
-      // subscription will resync shortly — never surface this as a save failure.
-      console.error(`[Settings] reseed ${agentType} draft failed:`, err)
-    }
-  }, [])
+    },
+    []
+  )
 
   const reseedGrokDraft = useCallback(
     () => reseedAgentDraft("grok"),
@@ -5872,7 +6102,7 @@ export function AcpAgentSettings() {
       await runBinaryAction(agent, "upgrade", "redownload_binary")
       return
     }
-    if (action.kind === "install_opencode_plugins") {
+    if (action.kind === "manage_opencode_plugins") {
       setPluginModalAgent(agent.agent_type)
       setPluginModalOpen(true)
       return
@@ -6042,8 +6272,9 @@ export function AcpAgentSettings() {
           <Wrench className="h-3 w-3" />
         ) : fix.kind === "uninstall_binary" || fix.kind === "uninstall_npx" ? (
           <Trash2 className="h-3 w-3" />
-        ) : fix.kind === "install_opencode_plugins" ? (
-          <Download className="h-3 w-3" />
+        ) : fix.kind === "manage_opencode_plugins" ? (
+          // OpenCode 2 installs its plugins itself; this opens the list.
+          <Puzzle className="h-3 w-3" />
         ) : fix.kind === "custom_install" ? (
           <PackagePlus className="h-3 w-3" />
         ) : null}
@@ -6160,6 +6391,9 @@ export function AcpAgentSettings() {
   const selectedIsSavingConfig = selectedAgent
     ? Boolean(savingConfig[selectedAgent.agent_type])
     : false
+  const selectedIsSavingInstructions = selectedAgent
+    ? Boolean(savingInstructions[selectedAgent.agent_type])
+    : false
   const selectedAgentKind = selectedAgent?.agent_type ?? null
 
   const selectedModelProviders = useMemo(() => {
@@ -6168,6 +6402,88 @@ export function AcpAgentSettings() {
       (p) => p.agent_type === selectedAgent.agent_type
     )
   }, [modelProviders, selectedAgent])
+
+  // The models a custom Claude gateway lists, for its model fields and the
+  // extra /model rows — asked the way Claude sends this key: as a Bearer
+  // token (`ANTHROPIC_AUTH_TOKEN`).
+  const claudeProviderModels = useProviderModels(
+    selectedAgent?.agent_type === "claude_code" &&
+      selectedDraft?.claudeAuthMode === "custom"
+      ? {
+          protocol: "anthropic",
+          baseUrl: selectedDraft.apiBaseUrl,
+          apiKey: selectedDraft.apiKey,
+          keyHeader: "bearer",
+        }
+      : null
+  )
+  // An OpenAI-compatible Cline provider's models, for its model field and the
+  // models.json table.
+  const clineProviderModels = useProviderModels(
+    selectedAgent?.agent_type === "cline" &&
+      selectedDraft?.clineProvider === CLINE_CUSTOM_MODEL_PROVIDER
+      ? {
+          protocol: "openai",
+          baseUrl: selectedDraft.clineBaseUrl,
+          apiKey: selectedDraft.clineApiKey,
+        }
+      : null
+  )
+  // A custom Grok endpoint's models, asked the way its backend talks: the
+  // Anthropic Messages list for `messages`, the OpenAI one otherwise; xAI's
+  // own API when the URL is left blank.
+  const grokProviderModels = useProviderModels(
+    selectedAgent?.agent_type === "grok" &&
+      selectedDraft?.grokAuthMode === "custom"
+      ? {
+          protocol:
+            selectedDraft.grokCustomApiBackend === "messages"
+              ? "anthropic"
+              : "openai",
+          baseUrl:
+            selectedDraft.grokCustomBaseUrl.trim() || GROK_DEFAULT_BASE_URL,
+          apiKey: selectedDraft.grokCustomApiKey,
+        }
+      : null
+  )
+  // A custom Hermes endpoint's models (OpenAI-compatible), for its model
+  // field. Hermes lists them in the composer itself, from the named provider
+  // codeg writes the endpoint as.
+  const hermesProviderModels = useProviderModels(
+    selectedAgent?.agent_type === "hermes" &&
+      selectedDraft?.hermesProvider === "custom"
+      ? {
+          protocol: "openai",
+          baseUrl: selectedDraft.apiBaseUrl,
+          apiKey: selectedDraft.apiKey,
+        }
+      : null
+  )
+  // The Gemini API's own models for a key-authenticated Gemini (a custom
+  // endpoint, or Google's when no URL is set): suggestions for its model
+  // field. Gemini CLI itself only ever offers its built-in list.
+  const geminiProviderModels = useProviderModels(
+    selectedAgent?.agent_type === "gemini" &&
+      (selectedDraft?.geminiAuthMode === "custom" ||
+        selectedDraft?.geminiAuthMode === "gemini_api_key")
+      ? {
+          protocol: "gemini",
+          baseUrl:
+            (selectedDraft.geminiAuthMode === "custom"
+              ? selectedDraft.apiBaseUrl.trim()
+              : "") || GEMINI_DEFAULT_API_BASE_URL,
+          apiKey: selectedDraft.geminiApiKey,
+        }
+      : null
+  )
+  /** The extra /model ids in effect: the bound provider's, else the panel's. */
+  const claudeBoundPickerModels = useMemo(() => {
+    if (selectedDraft?.claudeAuthMode !== "model_provider") return null
+    const provider = modelProviders.find(
+      (p) => p.id === selectedDraft.modelProviderId
+    )
+    return parseClaudeProviderModel(provider?.model ?? null).pickerModels ?? []
+  }, [modelProviders, selectedDraft])
 
   // The provider each agent was last bound to, remembered across auth-mode
   // changes. The auth-mode handlers drop `draft.modelProviderId` whenever the
@@ -6192,7 +6508,6 @@ export function AcpAgentSettings() {
   const selectedMissingModelProvider =
     selectedNeedsModelProvider && selectedDraft?.modelProviderId == null
   const selectedConfigText = selectedDraft?.configText ?? ""
-  const selectedOpenCodeAuthJsonText = selectedDraft?.openCodeAuthJsonText ?? ""
   // Inline validation for `writable_roots`: codex would accept a relative entry
   // and resolve it against CODEX_HOME, so it is surfaced before the save throws.
   const codexRelativeWritableRoot =
@@ -6208,49 +6523,40 @@ export function AcpAgentSettings() {
     isDesktop() && getActiveRemoteConnectionId() === null
   const selectedOpenCodeConfig = useMemo(() => {
     if (selectedAgentKind !== "open_code" || !locale) return null
-    return extractOpenCodeConfigValues(
-      selectedConfigText,
-      selectedOpenCodeAuthJsonText
-    )
-  }, [
-    locale,
-    selectedAgentKind,
-    selectedConfigText,
-    selectedOpenCodeAuthJsonText,
-  ])
+    return extractOpenCodeConfigValues(selectedConfigText)
+  }, [locale, selectedAgentKind, selectedConfigText])
   const openCodeConnected = useMemo(() => {
     if (selectedAgentKind !== "open_code") return []
     return buildConnectedProviders({
-      configText: selectedConfigText,
-      authJsonText: selectedOpenCodeAuthJsonText,
+      config: parseJsoncObject(selectedConfigText).value ?? {},
+      integrations: openCodeIntegrations,
       catalog: openCodeCatalog,
     })
   }, [
     selectedAgentKind,
     selectedConfigText,
-    selectedOpenCodeAuthJsonText,
+    openCodeIntegrations,
     openCodeCatalog,
   ])
-  const openCodeModelOptions = useMemo(() => {
-    const catalogGroups = buildConnectedModelOptions({
-      connected: openCodeConnected,
-      catalog: openCodeCatalog,
-    })
-    // Fall back to the config-derived groups before the catalog has loaded.
-    return catalogGroups.length > 0
-      ? catalogGroups
-      : buildOpenCodeModelOptions(selectedOpenCodeConfig)
-  }, [openCodeConnected, openCodeCatalog, selectedOpenCodeConfig])
+  const openCodeModelOptions = useMemo(
+    () =>
+      buildConnectedModelOptions({
+        connected: openCodeConnected,
+        catalog: openCodeCatalog,
+      }),
+    [openCodeConnected, openCodeCatalog]
+  )
   const openCodeCatalogIds = useMemo(
     () => new Set(openCodeCatalog.map((p) => p.id)),
     [openCodeCatalog]
   )
   // Split connected providers into two single-purpose surfaces:
-  //  - well-known (catalog) providers connected via auth.json → top list
-  //  - custom OpenAI-compatible endpoints (a `provider.<id>` block NOT in the
-  //    catalog) → the bottom "custom provider" editor.
-  // The discriminator is `hasConfigBlock && !inCatalog`, so an auth-only
-  // well-known provider (no block) stays in the top list even if the catalog
+  //  - models.dev providers OpenCode is connected to (a stored credential or
+  //    an environment variable) → top list
+  //  - custom endpoints (a provider block NOT in the catalog) → the bottom
+  //    "custom provider" editor.
+  // The discriminator is `hasConfigBlock && !inCatalog`, so a credential-only
+  // models.dev provider (no block) stays in the top list even if the catalog
   // fails to load — it can never be misfiled as custom and vanish.
   const openCodeWellKnownConnected = useMemo(
     () => openCodeConnected.filter((p) => !(p.hasConfigBlock && !p.inCatalog)),
@@ -6263,6 +6569,37 @@ export function AcpAgentSettings() {
       ),
     [selectedOpenCodeConfig, openCodeCatalogIds]
   )
+  const openCodeConnectedById = useMemo(
+    () => new Map(openCodeConnected.map((p) => [p.id, p])),
+    [openCodeConnected]
+  )
+  // OpenCode is asked for its integrations (providers and how each is
+  // connected) once it is installed: the credentials live in its own store, so
+  // the binary is what reads them. The ref dedupes like the catalog's below;
+  // a failed load is retried by the panel's refresh and after an install.
+  const selectedOpenCodeInstalled =
+    selectedAgentKind === "open_code" &&
+    Boolean(selectedAgent?.installed_version)
+  const loadOpenCodeIntegrations = useCallback(async () => {
+    openCodeIntegrationsRequestedRef.current = true
+    setOpenCodeIntegrationsLoading(true)
+    try {
+      const list = await opencodeListIntegrations()
+      setOpenCodeIntegrations(list)
+      setOpenCodeIntegrationsError(null)
+    } catch (err) {
+      console.error("[Settings] opencode integrations load failed:", err)
+      openCodeIntegrationsRequestedRef.current = false
+      setOpenCodeIntegrationsError(toErrorMessage(err))
+    } finally {
+      setOpenCodeIntegrationsLoading(false)
+    }
+  }, [])
+  useEffect(() => {
+    if (!selectedOpenCodeInstalled) return
+    if (openCodeIntegrationsRequestedRef.current) return
+    void loadOpenCodeIntegrations()
+  }, [selectedOpenCodeInstalled, loadOpenCodeIntegrations])
   // Lazily load the models.dev catalog the first time an OpenCode agent is
   // viewed. Backend resolves live → cache → bundled snapshot, so this never
   // hard-fails; on error we keep an empty catalog (custom-only flow) and allow
@@ -6370,7 +6707,11 @@ export function AcpAgentSettings() {
   const handleConfigTextChange = useCallback(
     (nextText: string) => {
       if (!selectedAgent || !selectedDraft) return
-      const parseResult = parseConfigJsonText(nextText)
+      // OpenCode reads its config as JSONC; the rest read strict JSON.
+      const parseResult =
+        selectedAgent.agent_type === "open_code"
+          ? { error: parseJsoncObject(nextText).error }
+          : parseConfigJsonText(nextText)
       setConfigErrors((prev) => ({
         ...prev,
         [selectedAgent.agent_type]: parseResult.error,
@@ -6385,10 +6726,7 @@ export function AcpAgentSettings() {
       }
 
       if (selectedAgent.agent_type === "open_code") {
-        const openCode = extractOpenCodeConfigValues(
-          nextText,
-          selectedDraft.openCodeAuthJsonText
-        )
+        const openCode = extractOpenCodeConfigValues(nextText)
         updateSelectedDraft((current) => ({
           ...current,
           configText: nextText,
@@ -6406,6 +6744,10 @@ export function AcpAgentSettings() {
           clineApiKey: cline.apiKey,
           clineModel: cline.model,
           clineBaseUrl: cline.baseUrl,
+          // Text that names no table says nothing about the one loaded: the
+          // list keeps it, so a later pick edits the whole table rather than
+          // replacing it with the pick alone.
+          clineModels: cline.models ?? current.clineModels,
         }))
         return
       }
@@ -6461,6 +6803,7 @@ export function AcpAgentSettings() {
         claudeSendAttributionHeader: important.claudeSendAttributionHeader,
         claudeDisableNonessentialTraffic:
           important.claudeDisableNonessentialTraffic,
+        claudeGatewayDiscovery: important.claudeGatewayDiscovery,
       }))
     },
     [selectedAgent, selectedDraft, updateSelectedDraft]
@@ -6534,6 +6877,40 @@ export function AcpAgentSettings() {
         // re-persist a stale value from the overlay. Mirrors
         // handleImportantConfigChange's dual configText + envText write.
         envText: patchEnvText(current.envText, { [envKey]: value }),
+        configText: next.configText,
+      }))
+    },
+    [selectedAgent, selectedDraft, t, updateSelectedDraft]
+  )
+
+  // Claude reads the gateway discovery switch as set-or-not, so turning it off
+  // removes the key from the native config `env` and the DB env overlay.
+  const handleClaudeGatewayDiscoveryChange = useCallback(
+    (enabled: boolean) => {
+      if (
+        !selectedAgent ||
+        !selectedDraft ||
+        selectedAgent.agent_type !== "claude_code"
+      )
+        return
+      const next = setClaudeEnvFlagInConfigText(
+        selectedDraft.configText,
+        CLAUDE_GATEWAY_DISCOVERY_ENV_KEY,
+        enabled ? CLAUDE_ENV_FLAG_ON : null
+      )
+      if (next.recoveredFromInvalid) {
+        toast.warning(t("warnings.nativeJsonRecoveredStructured"))
+      }
+      setConfigErrors((prev) => ({
+        ...prev,
+        [selectedAgent.agent_type]: null,
+      }))
+      updateSelectedDraft((current) => ({
+        ...current,
+        claudeGatewayDiscovery: enabled,
+        envText: patchEnvText(current.envText, {
+          [CLAUDE_GATEWAY_DISCOVERY_ENV_KEY]: enabled ? CLAUDE_ENV_FLAG_ON : "",
+        }),
         configText: next.configText,
       }))
     },
@@ -6765,31 +7142,22 @@ export function AcpAgentSettings() {
           }
         })
       } else if (agentType === "codex") {
-        // The provider stores a structured model config; root `model` is its
-        // default slug and we reference the catalog the bind path generates.
+        // The provider stores a structured model config. The save publishes
+        // what it makes — the catalog, `model_catalog_json`, root `model` —
+        // from the provider's row; the draft only mirrors the endpoint.
         const codexList = parseCodexModelConfig(provider?.model ?? null)
-        const codexHasConfig =
-          codexList.customs.length > 0 ||
-          (codexList.excludedOfficials?.length ?? 0) > 0
         const codexModel = codexList.default ?? codexList.customs[0]?.slug ?? ""
         const nextAuthPatch = patchCodexAuthJsonText(
           selectedDraft.codexAuthJsonText,
           { apiKey, authMode: null }
         )
         const nextAuthJsonText = nextAuthPatch.authJsonText
-        // Always pass the provider's model (empty string clears it from the toml).
-        let nextConfigTomlText = patchCodexConfigTomlText(
+        const nextConfigTomlText = patchCodexConfigTomlText(
           selectedDraft.codexConfigTomlText,
           {
             modelProvider: CODEX_DEFAULT_MODEL_PROVIDER,
             apiBaseUrl: apiUrl,
-            model: codexModel,
           }
-        )
-        nextConfigTomlText = updateTomlRootStringKey(
-          nextConfigTomlText,
-          "model_catalog_json",
-          codexHasConfig ? "codeg-model-catalog.json" : ""
         )
         const synced = extractCodexImportantValues(
           nextAuthJsonText,
@@ -7204,8 +7572,13 @@ export function AcpAgentSettings() {
 
   const handleClineFieldChange = useCallback(
     (
-      key: "clineProvider" | "clineApiKey" | "clineModel" | "clineBaseUrl",
-      value: string
+      key:
+        | "clineProvider"
+        | "clineApiKey"
+        | "clineModel"
+        | "clineBaseUrl"
+        | "clineModels",
+      value: string | string[]
     ) => {
       if (
         !selectedAgent ||
@@ -7218,14 +7591,17 @@ export function AcpAgentSettings() {
         const next = { ...current, [key]: value }
         // Rebuild config_json from Cline draft fields
         const config: Record<string, unknown> = {}
-        config.apiProvider =
-          key === "clineProvider" ? value : next.clineProvider
-        const apiKey = key === "clineApiKey" ? value : next.clineApiKey
-        if (apiKey.trim()) config.apiKey = apiKey.trim()
-        const model = key === "clineModel" ? value : next.clineModel
-        if (model.trim()) config.model = model.trim()
-        const baseUrl = key === "clineBaseUrl" ? value : next.clineBaseUrl
-        if (baseUrl.trim()) config.apiBaseUrl = baseUrl.trim()
+        config.apiProvider = next.clineProvider
+        if (next.clineApiKey.trim()) config.apiKey = next.clineApiKey.trim()
+        if (next.clineModel.trim()) config.model = next.clineModel.trim()
+        if (next.clineBaseUrl.trim())
+          config.apiBaseUrl = next.clineBaseUrl.trim()
+        // Only an OpenAI-compatible provider's models come from the table.
+        if (
+          next.clineProvider === CLINE_CUSTOM_MODEL_PROVIDER &&
+          next.clineModels !== null
+        )
+          config.models = next.clineModels
         next.configText = JSON.stringify(config, null, 2)
         return next
       })
@@ -7234,33 +7610,31 @@ export function AcpAgentSettings() {
   )
 
   const handleOpenCodeConfigPatch = useCallback(
-    (mutator: (config: Record<string, unknown>) => void) => {
+    (mutator: (config: Record<string, unknown>) => void): string | null => {
       if (
         !selectedAgent ||
         !selectedDraft ||
         selectedAgent.agent_type !== "open_code"
       )
-        return
-      const nextConfig = patchOpenCodeConfigText(
-        selectedDraft.configText,
-        mutator
-      )
-      if (nextConfig.recoveredFromInvalid) {
-        toast.warning(t("warnings.nativeJsonRecoveredOpenCode"))
+        return null
+      const next = patchOpenCodeConfigText(selectedDraft.configText, mutator)
+      if (next.error) {
+        toast.error(t("errors.openCodeConfigUnreadable"), {
+          description: next.error,
+        })
+        return null
       }
       setConfigErrors((prev) => ({
         ...prev,
         [selectedAgent.agent_type]: null,
       }))
-      const parsed = extractOpenCodeConfigValues(
-        nextConfig.configText,
-        selectedDraft.openCodeAuthJsonText
-      )
+      const parsed = extractOpenCodeConfigValues(next.configText)
       updateSelectedDraft((current) => ({
         ...current,
-        configText: nextConfig.configText,
+        configText: next.configText,
         model: parsed.model,
       }))
+      return next.configText
     },
     [selectedAgent, selectedDraft, t, updateSelectedDraft]
   )
@@ -7268,122 +7642,157 @@ export function AcpAgentSettings() {
   const handleOpenCodeFieldChange = useCallback(
     (key: "model" | "small_model", value: string) => {
       handleOpenCodeConfigPatch((config) => {
-        const trimmed = value.trim()
-        if (!trimmed) {
-          delete config[key]
-          return
-        }
-        config[key] = trimmed
+        if (key === "model") setMainModel(config, value)
+        else setSmallModel(config, value)
       })
     },
     [handleOpenCodeConfigPatch]
   )
 
-  // Connect a provider from the dialog: sync the draft, then persist both files.
-  const applyOpenCodeConnect = useCallback(
-    async (
-      next: { configText: string; authJsonText: string },
-      providerId: string
-    ) => {
-      if (!selectedAgent || selectedAgent.agent_type !== "open_code") return
-      const parsed = extractOpenCodeConfigValues(
-        next.configText,
-        next.authJsonText
-      )
-      updateSelectedDraft((current) => ({
-        ...current,
-        configText: next.configText,
-        openCodeAuthJsonText: next.authJsonText,
-        model: parsed.model,
-      }))
-      setConfigErrors((prev) => ({ ...prev, open_code: null }))
-      try {
-        await persistConfig("open_code", next.configText, {
-          openCodeAuthJsonText: next.authJsonText,
-        })
-        toast.success(t("toasts.providerConnected", { providerId }), {
-          description: t("toasts.configSavedHint"),
-        })
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        toast.error(t("toasts.connectFailed", { providerId }), {
-          description: message,
-        })
-        throw err
+  // Apply a config change and save it right away, for the actions that go
+  // with an immediate credential change (connect, disconnect, delete) and the
+  // enable switch. Throws when the change cannot be made or saved.
+  const persistOpenCodeConfigNow = useCallback(
+    async (mutator: (config: Record<string, unknown>) => void) => {
+      const before = selectedDraft?.configText
+      const nextText = handleOpenCodeConfigPatch(mutator)
+      if (nextText === null) {
+        throw new Error(t("errors.openCodeConfigUnreadable"))
       }
+      if (nextText === before) return
+      await persistConfig("open_code", nextText)
     },
-    [selectedAgent, updateSelectedDraft, persistConfig, t]
+    [handleOpenCodeConfigPatch, persistConfig, selectedDraft, t]
   )
 
-  const handleOpenCodeDisconnect = useCallback(
-    async (providerId: string, hasConfigBlock: boolean) => {
-      if (
-        !selectedAgent ||
-        !selectedDraft ||
-        selectedAgent.agent_type !== "open_code"
-      )
-        return
-      const next = disconnectProvider({
-        configText: selectedDraft.configText,
-        authJsonText: selectedDraft.openCodeAuthJsonText,
-        providerId,
-        removeConfigBlock: hasConfigBlock,
-      })
-      const parsed = extractOpenCodeConfigValues(
-        next.configText,
-        next.authJsonText
-      )
-      updateSelectedDraft((current) => ({
-        ...current,
-        configText: next.configText,
-        openCodeAuthJsonText: next.authJsonText,
-        model: parsed.model,
-      }))
+  // A credential change as OpenCode reports it: the integrations it left, and
+  // the running sessions that keep the old credentials until restarted.
+  const applyOpenCodeCredentialChange = useCallback(
+    (change: OpenCodeCredentialChange) => {
+      setOpenCodeIntegrations(change.integrations)
+      setOpenCodeIntegrationsError(null)
+      reportAffectedSessions(change.stale_sessions)
+    },
+    [reportAffectedSessions]
+  )
+
+  // Connect (or edit) a provider from the dialog: a base URL override goes to
+  // the config, the key to OpenCode's own credential store.
+  const applyOpenCodeConnect = useCallback(
+    async (request: OpenCodeConnectRequest) => {
+      if (!selectedAgent || selectedAgent.agent_type !== "open_code") return
+      const providerId = request.providerId
+      setOpenCodeCredentialBusy(providerId)
       try {
-        await persistConfig("open_code", next.configText, {
-          openCodeAuthJsonText: next.authJsonText,
-        })
-        toast.success(t("toasts.providerDisconnected", { providerId }))
+        if (request.baseUrlOverride !== undefined) {
+          await persistOpenCodeConfigNow((config) =>
+            setWellKnownBaseUrl(config, providerId, request.baseUrlOverride)
+          )
+        }
+        if (request.apiKey) {
+          applyOpenCodeCredentialChange(
+            await opencodeConnectKey({
+              integrationId: providerId,
+              key: request.apiKey,
+              answer: request.answer ?? null,
+              replace: request.replace,
+            })
+          )
+        }
+        toast.success(t("toasts.providerConnected", { providerId }))
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        toast.error(t("toasts.disconnectFailed", { providerId }), {
-          description: message,
+        toast.error(t("toasts.connectFailed", { providerId }), {
+          description: toErrorMessage(err),
         })
+        throw err
+      } finally {
+        setOpenCodeCredentialBusy(null)
       }
     },
-    [selectedAgent, selectedDraft, updateSelectedDraft, persistConfig, t]
+    [applyOpenCodeCredentialChange, persistOpenCodeConfigNow, selectedAgent, t]
+  )
+
+  // Declare a custom provider, then connect its key. The block is saved
+  // first: OpenCode only knows the integration once its config declares it.
+  const applyOpenCodeCustomProvider = useCallback(
+    async (input: CustomProviderInput & { apiKey: string }) => {
+      if (!selectedAgent || selectedAgent.agent_type !== "open_code") return
+      const providerId = input.id
+      setOpenCodeCredentialBusy(providerId)
+      try {
+        await persistOpenCodeConfigNow((config) =>
+          applyCustomProvider(config, input)
+        )
+        if (input.apiKey) {
+          applyOpenCodeCredentialChange(
+            await opencodeConnectKey({
+              integrationId: providerId,
+              key: input.apiKey,
+              replace: true,
+            })
+          )
+        }
+        toast.success(t("toasts.providerConnected", { providerId }))
+      } catch (err) {
+        toast.error(t("toasts.connectFailed", { providerId }), {
+          description: toErrorMessage(err),
+        })
+        throw err
+      } finally {
+        setOpenCodeCredentialBusy(null)
+      }
+    },
+    [applyOpenCodeCredentialChange, persistOpenCodeConfigNow, selectedAgent, t]
+  )
+
+  // Disconnect a models.dev provider: its stored credentials go. A config
+  // block it has (a base URL override) goes too, and once nothing connects it
+  // any more, so do the model selections and rules naming it. One still
+  // reachable through an environment variable keeps them.
+  const handleOpenCodeDisconnect = useCallback(
+    async (providerId: string, hasConfigBlock: boolean) => {
+      if (!selectedAgent || selectedAgent.agent_type !== "open_code") return
+      setOpenCodeCredentialBusy(providerId)
+      try {
+        const change = await opencodeDisconnectProvider(providerId)
+        applyOpenCodeCredentialChange(change)
+        const stillConnected = change.integrations.some(
+          (i) => i.id === providerId && i.connections.length > 0
+        )
+        if (hasConfigBlock || !stillConnected) {
+          await persistOpenCodeConfigNow((config) =>
+            removeProviderFromConfig(config, providerId)
+          )
+        }
+        toast.success(t("toasts.providerDisconnected", { providerId }))
+      } catch (err) {
+        toast.error(t("toasts.disconnectFailed", { providerId }), {
+          description: toErrorMessage(err),
+        })
+      } finally {
+        setOpenCodeCredentialBusy(null)
+      }
+    },
+    [applyOpenCodeCredentialChange, persistOpenCodeConfigNow, selectedAgent, t]
   )
 
   const handleOpenCodeToggleEnabled = useCallback(
     async (providerId: string, enabled: boolean) => {
-      if (
-        !selectedAgent ||
-        !selectedDraft ||
-        selectedAgent.agent_type !== "open_code"
-      )
-        return
-      const nextConfig = setProviderEnabled({
-        configText: selectedDraft.configText,
-        providerId,
-        enabled,
-      })
-      updateSelectedDraft((current) => ({
-        ...current,
-        configText: nextConfig,
-      }))
       try {
-        await persistConfig("open_code", nextConfig, {
-          openCodeAuthJsonText: selectedDraft.openCodeAuthJsonText,
-        })
+        await persistOpenCodeConfigNow((config) =>
+          setProviderEnabled(config, providerId, enabled)
+        )
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        toast.error(t("toasts.saveOpenCodeFailed"), { description: message })
+        toast.error(t("toasts.saveOpenCodeFailed"), {
+          description: toErrorMessage(err),
+        })
       }
     },
-    [selectedAgent, selectedDraft, updateSelectedDraft, persistConfig, t]
+    [persistOpenCodeConfigNow, t]
   )
 
-  // Force a fresh models.dev fetch (bypassing the 24h cache) on demand.
+  // Re-read the models.dev catalog (bypassing the 24h cache) and OpenCode's
+  // integrations, on demand.
   const handleOpenCodeRefreshCatalog = useCallback(async () => {
     setOpenCodeCatalogLoading(true)
     try {
@@ -7399,162 +7808,71 @@ export function AcpAgentSettings() {
     } finally {
       setOpenCodeCatalogLoading(false)
     }
-  }, [t])
+    if (selectedOpenCodeInstalled) void loadOpenCodeIntegrations()
+  }, [loadOpenCodeIntegrations, selectedOpenCodeInstalled, t])
 
-  const handleOpenCodeRemoveProvider = useCallback(
-    (providerId: string) => {
-      if (
-        !selectedAgent ||
-        !selectedDraft ||
-        selectedAgent.agent_type !== "open_code"
-      ) {
-        return null
+  // Forget a deleted custom provider's per-row editor state.
+  const clearOpenCodeProviderUiState = useCallback((targetId: string) => {
+    setOpenCodeProviderId((current) => (current === targetId ? "" : current))
+    setOpenCodeNewModelIds((prev) => {
+      if (typeof prev[targetId] === "undefined") return prev
+      const next = { ...prev }
+      delete next[targetId]
+      return next
+    })
+    setOpenCodeModelConfigExpanded((prev) => {
+      if (typeof prev[targetId] === "undefined") return prev
+      const next = { ...prev }
+      delete next[targetId]
+      return next
+    })
+    setOpenCodeModelIdDrafts((prev) => {
+      const prefix = `${targetId}:`
+      const keys = Object.keys(prev).filter((key) => key.startsWith(prefix))
+      if (keys.length === 0) return prev
+      const next = { ...prev }
+      for (const key of keys) {
+        delete next[key]
       }
-      const targetId = providerId.trim()
-      if (!targetId) return null
+      return next
+    })
+  }, [])
 
-      const nextConfig = patchOpenCodeConfigText(
-        selectedDraft.configText,
-        (config) => {
-          const providerRoot = asObjectRecord(config.provider)
-          if (providerRoot) {
-            delete providerRoot[targetId]
-            if (Object.keys(providerRoot).length === 0) {
-              delete config.provider
-            }
-          }
-
-          const enabledProviders = Array.isArray(config.enabled_providers)
-            ? config.enabled_providers
-                .filter((item): item is string => typeof item === "string")
-                .filter((item) => item !== targetId)
-            : []
-          if (enabledProviders.length > 0) {
-            config.enabled_providers = enabledProviders
-          } else {
-            delete config.enabled_providers
-          }
-
-          const disabledProviders = Array.isArray(config.disabled_providers)
-            ? config.disabled_providers
-                .filter((item): item is string => typeof item === "string")
-                .filter((item) => item !== targetId)
-            : []
-          if (disabledProviders.length > 0) {
-            config.disabled_providers = disabledProviders
-          } else {
-            delete config.disabled_providers
-          }
-
-          // Don't leave model/small_model pointing at the removed provider.
-          for (const key of [
-            "model",
-            "small_model",
-            "smallModel",
-            "small-model",
-          ]) {
-            if (modelReferencesProvider(config[key], targetId)) {
-              delete config[key]
-            }
-          }
-        }
-      )
-      if (nextConfig.recoveredFromInvalid) {
-        toast.warning(t("warnings.nativeJsonRecoveredOpenCode"))
-      }
-
-      const nextAuth = patchOpenCodeAuthJsonText(
-        selectedDraft.openCodeAuthJsonText,
-        (authObject) => {
-          delete authObject[targetId]
-        }
-      )
-      if (nextAuth.recoveredFromInvalid) {
-        toast.warning(t("warnings.openCodeAuthRecovered"))
-      }
-
-      const nextOpenCode = extractOpenCodeConfigValues(
-        nextConfig.configText,
-        nextAuth.authJsonText
-      )
-      const nextDraft = {
-        ...selectedDraft,
-        configText: nextConfig.configText,
-        openCodeAuthJsonText: nextAuth.authJsonText,
-        model: nextOpenCode.model,
-      }
-      setConfigErrors((prev) => ({
-        ...prev,
-        [selectedAgent.agent_type]: null,
-      }))
-      setDrafts((prev) => ({
-        ...prev,
-        [selectedAgent.agent_type]: nextDraft,
-      }))
-      setOpenCodeProviderId((current) => (current === targetId ? "" : current))
-      setOpenCodeNewModelIds((prev) => {
-        if (typeof prev[targetId] === "undefined") return prev
-        const next = { ...prev }
-        delete next[targetId]
-        return next
-      })
-      setOpenCodeModelConfigExpanded((prev) => {
-        if (typeof prev[targetId] === "undefined") return prev
-        const next = { ...prev }
-        delete next[targetId]
-        return next
-      })
-      setOpenCodeModelIdDrafts((prev) => {
-        const prefix = `${targetId}:`
-        const keys = Object.keys(prev).filter((key) => key.startsWith(prefix))
-        if (keys.length === 0) return prev
-        const next = { ...prev }
-        for (const key of keys) {
-          delete next[key]
-        }
-        return next
-      })
-      return {
-        enabled: nextDraft.enabled,
-        envText: nextDraft.envText,
-        configText: nextDraft.configText,
-        openCodeAuthJsonText: nextDraft.openCodeAuthJsonText,
-      }
-    },
-    [selectedAgent, selectedDraft, t]
-  )
-
-  const confirmOpenCodeProviderDelete = useCallback(() => {
+  // Delete a custom provider: its stored credentials first (so a failure there
+  // leaves the config as it was), then its block and everything naming it.
+  const confirmOpenCodeProviderDelete = useCallback(async () => {
     const providerId = openCodeDeleteProviderId?.trim()
     if (!providerId) return
-    const removed = handleOpenCodeRemoveProvider(providerId)
     setOpenCodeDeleteProviderId(null)
-    if (
-      !removed ||
-      !selectedAgent ||
-      selectedAgent.agent_type !== "open_code"
-    ) {
-      return
+    if (!selectedAgent || selectedAgent.agent_type !== "open_code") return
+    setOpenCodeCredentialBusy(providerId)
+    try {
+      if ((openCodeConnectedById.get(providerId)?.credentialCount ?? 0) > 0) {
+        applyOpenCodeCredentialChange(
+          await opencodeDisconnectProvider(providerId)
+        )
+      }
+      await persistOpenCodeConfigNow((config) =>
+        removeProviderFromConfig(config, providerId)
+      )
+      clearOpenCodeProviderUiState(providerId)
+      toast.success(t("toasts.providerDeleted", { providerId }), {
+        description: t("toasts.openCodeConfigSynced"),
+      })
+    } catch (err) {
+      console.error("[Settings] remove opencode provider failed:", err)
+      toast.error(t("toasts.providerDeleteFailed", { providerId }), {
+        description: toErrorMessage(err),
+      })
+    } finally {
+      setOpenCodeCredentialBusy(null)
     }
-    persistConfig(selectedAgent.agent_type, removed.configText, {
-      openCodeAuthJsonText: removed.openCodeAuthJsonText,
-    })
-      .then(() => {
-        toast.success(t("toasts.providerDeleted", { providerId }), {
-          description: t("toasts.openCodeConfigSynced"),
-        })
-      })
-      .catch((err) => {
-        console.error("[Settings] remove opencode provider failed:", err)
-        const message = toErrorMessage(err)
-        toast.error(t("toasts.providerDeleteFailed", { providerId }), {
-          description: message,
-        })
-      })
   }, [
-    handleOpenCodeRemoveProvider,
+    applyOpenCodeCredentialChange,
+    clearOpenCodeProviderUiState,
+    openCodeConnectedById,
     openCodeDeleteProviderId,
-    persistConfig,
+    persistOpenCodeConfigNow,
     selectedAgent,
     t,
   ])
@@ -7563,122 +7881,25 @@ export function AcpAgentSettings() {
     (providerId: string, enabled: boolean) => {
       const targetId = providerId.trim()
       if (!targetId) return
-      handleOpenCodeConfigPatch((config) => {
-        const hadEnabledAllowlist =
-          Array.isArray(config.enabled_providers) &&
-          config.enabled_providers.length > 0
-        const enabledProviders = Array.isArray(config.enabled_providers)
-          ? config.enabled_providers
-              .filter((item): item is string => typeof item === "string")
-              .map((item) => item.trim())
-              .filter(Boolean)
-          : []
-        const disabledProviders = Array.isArray(config.disabled_providers)
-          ? config.disabled_providers
-              .filter((item): item is string => typeof item === "string")
-              .map((item) => item.trim())
-              .filter(Boolean)
-          : []
-
-        const nextEnabled = new Set(enabledProviders)
-        const nextDisabled = new Set(disabledProviders)
-
-        if (enabled) {
-          nextDisabled.delete(targetId)
-          if (hadEnabledAllowlist) {
-            nextEnabled.add(targetId)
-          }
-        } else {
-          nextDisabled.add(targetId)
-          if (hadEnabledAllowlist) {
-            nextEnabled.delete(targetId)
-          }
-        }
-
-        const enabledArray = Array.from(nextEnabled)
-        const disabledArray = Array.from(nextDisabled)
-        if (enabledArray.length > 0) {
-          config.enabled_providers = enabledArray
-        } else {
-          delete config.enabled_providers
-        }
-        if (disabledArray.length > 0) {
-          config.disabled_providers = disabledArray
-        } else {
-          delete config.disabled_providers
-        }
-      })
+      handleOpenCodeConfigPatch((config) =>
+        setProviderEnabled(config, targetId, enabled)
+      )
     },
     [handleOpenCodeConfigPatch]
   )
 
   const handleOpenCodeProviderFieldChange = useCallback(
-    (
-      providerId: string,
-      key: "name" | "api" | "npm" | "baseURL" | "apiKey",
-      value: string
-    ) => {
+    (providerId: string, key: "name" | "npm" | "baseURL", value: string) => {
       const targetId = providerId.trim()
       if (!targetId) return
-
-      // The API key is a secret: it goes ONLY into auth.json, never into
-      // opencode.json. setProviderApiKey also scrubs any stale options.apiKey.
-      if (key === "apiKey") {
-        if (!selectedDraft) return
-        const next = setProviderApiKey({
-          configText: selectedDraft.configText,
-          authJsonText: selectedDraft.openCodeAuthJsonText,
-          providerId: targetId,
-          apiKey: value,
-        })
-        const parsed = extractOpenCodeConfigValues(
-          next.configText,
-          next.authJsonText
-        )
-        setConfigErrors((prev) => ({ ...prev, open_code: null }))
-        updateSelectedDraft((current) => ({
-          ...current,
-          configText: next.configText,
-          openCodeAuthJsonText: next.authJsonText,
-          model: parsed.model,
-        }))
-        return
-      }
-
       handleOpenCodeConfigPatch((config) => {
-        const providerRoot = asObjectRecord(config.provider) ?? {}
-        if (!asObjectRecord(config.provider)) {
-          config.provider = providerRoot
-        }
-
-        const currentProvider = asObjectRecord(providerRoot[targetId]) ?? {}
-        if (!asObjectRecord(providerRoot[targetId])) {
-          providerRoot[targetId] = currentProvider
-        }
-        const trimmed = value.trim()
-        if (key === "baseURL") {
-          const options = asObjectRecord(currentProvider.options) ?? {}
-          if (!asObjectRecord(currentProvider.options)) {
-            currentProvider.options = options
-          }
-          if (trimmed) {
-            options[key] = trimmed
-          } else {
-            delete options[key]
-          }
-          if (Object.keys(options).length === 0) {
-            delete currentProvider.options
-          }
-          return
-        }
-        if (trimmed) {
-          currentProvider[key] = trimmed
-        } else {
-          delete currentProvider[key]
-        }
+        const { block, shape } = providerBlockForEdit(config, targetId)
+        if (key === "name") setProviderBlockName(block, value)
+        else if (key === "npm") setProviderBlockNpm(block, shape, value)
+        else setProviderBlockBaseUrl(block, shape, value)
       })
     },
-    [handleOpenCodeConfigPatch, selectedDraft, updateSelectedDraft]
+    [handleOpenCodeConfigPatch]
   )
 
   const handleOpenCodeModelDraftChange = useCallback(
@@ -7706,24 +7927,8 @@ export function AcpAgentSettings() {
         return
       }
       handleOpenCodeConfigPatch((config) => {
-        const providerRoot = asObjectRecord(config.provider) ?? {}
-        if (!asObjectRecord(config.provider)) {
-          config.provider = providerRoot
-        }
-
-        const currentProvider =
-          asObjectRecord(providerRoot[targetProviderId]) ?? {}
-        if (!asObjectRecord(providerRoot[targetProviderId])) {
-          providerRoot[targetProviderId] = currentProvider
-        }
-
-        const modelsRoot = asObjectRecord(currentProvider.models) ?? {}
-        if (!asObjectRecord(currentProvider.models)) {
-          currentProvider.models = modelsRoot
-        }
-        modelsRoot[nextModelId] = {
-          name: nextModelId,
-        }
+        const { block } = providerBlockForEdit(config, targetProviderId)
+        providerBlockModels(block)[nextModelId] = { name: nextModelId }
       })
       setOpenCodeNewModelIds((prev) => ({
         ...prev,
@@ -7733,22 +7938,38 @@ export function AcpAgentSettings() {
     [handleOpenCodeConfigPatch, openCodeNewModelIds, selectedOpenCodeConfig, t]
   )
 
+  // The provider's models as picked from its own list: a model that stays
+  // keeps its entry, a new one is `{name: id}`, an unpicked one goes.
+  const handleOpenCodeSetModels = useCallback(
+    (providerId: string, ids: string[]) => {
+      const targetProviderId = providerId.trim()
+      if (!targetProviderId) return
+      handleOpenCodeConfigPatch((config) => {
+        const { block } = providerBlockForEdit(config, targetProviderId)
+        const previous = asObjectRecord(block.models) ?? {}
+        const next: Record<string, unknown> = {}
+        for (const id of ids) {
+          next[id] = Object.prototype.hasOwnProperty.call(previous, id)
+            ? previous[id]
+            : { name: id }
+        }
+        block.models = next
+      })
+    },
+    [handleOpenCodeConfigPatch]
+  )
+
   const handleOpenCodeRemoveModel = useCallback(
     (providerId: string, modelId: string) => {
       const targetProviderId = providerId.trim()
       const targetModelId = modelId.trim()
       if (!targetProviderId || !targetModelId) return
       handleOpenCodeConfigPatch((config) => {
-        const providerRoot = asObjectRecord(config.provider)
-        if (!providerRoot) return
-        const currentProvider = asObjectRecord(providerRoot[targetProviderId])
-        if (!currentProvider) return
-        const modelsRoot = asObjectRecord(currentProvider.models)
-        if (!modelsRoot) return
-        delete modelsRoot[targetModelId]
-        if (Object.keys(modelsRoot).length === 0) {
-          delete currentProvider.models
-        }
+        if (!existingBlockModels(config, targetProviderId)) return
+        const { block } = providerBlockForEdit(config, targetProviderId)
+        const models = providerBlockModels(block)
+        delete models[targetModelId]
+        if (Object.keys(models).length === 0) delete block.models
       })
       const draftKey = `${targetProviderId}:${targetModelId}`
       setOpenCodeModelIdDrafts((prev) => {
@@ -7807,24 +8028,15 @@ export function AcpAgentSettings() {
       }
 
       handleOpenCodeConfigPatch((config) => {
-        const providerRoot = asObjectRecord(config.provider) ?? {}
-        if (!asObjectRecord(config.provider)) {
-          config.provider = providerRoot
-        }
-        const currentProvider =
-          asObjectRecord(providerRoot[targetProviderId]) ?? {}
-        if (!asObjectRecord(providerRoot[targetProviderId])) {
-          providerRoot[targetProviderId] = currentProvider
-        }
-        const modelsRoot = asObjectRecord(currentProvider.models) ?? {}
-        if (!asObjectRecord(currentProvider.models)) {
-          currentProvider.models = modelsRoot
-        }
-        const currentModel = asObjectRecord(modelsRoot[targetModelId]) ?? {}
-        if (!asObjectRecord(modelsRoot[targetModelId])) return
+        if (!existingBlockModels(config, targetProviderId)) return
+        const { block } = providerBlockForEdit(config, targetProviderId)
+        const models = providerBlockModels(block)
+        const currentModel = asObjectRecord(models[targetModelId])
+        if (!currentModel) return
+        // `id` was the alias codeg's earlier releases wrote next to the key.
         delete currentModel.id
-        modelsRoot[nextModelId] = currentModel
-        delete modelsRoot[targetModelId]
+        models[nextModelId] = currentModel
+        delete models[targetModelId]
       })
 
       setOpenCodeModelIdDrafts((prev) => {
@@ -7847,30 +8059,16 @@ export function AcpAgentSettings() {
       const targetModelId = modelId.trim()
       if (!targetProviderId || !targetModelId) return
       handleOpenCodeConfigPatch((config) => {
-        const providerRoot = asObjectRecord(config.provider) ?? {}
-        if (!asObjectRecord(config.provider)) {
-          config.provider = providerRoot
-        }
-        const currentProvider =
-          asObjectRecord(providerRoot[targetProviderId]) ?? {}
-        if (!asObjectRecord(providerRoot[targetProviderId])) {
-          providerRoot[targetProviderId] = currentProvider
-        }
-        const modelsRoot = asObjectRecord(currentProvider.models) ?? {}
-        if (!asObjectRecord(currentProvider.models)) {
-          currentProvider.models = modelsRoot
-        }
-        const currentModel = asObjectRecord(modelsRoot[targetModelId]) ?? {}
-        if (!asObjectRecord(modelsRoot[targetModelId])) {
-          modelsRoot[targetModelId] = currentModel
-        }
-        const trimmed = value.trim()
-        if (trimmed) {
-          currentModel.name = trimmed
+        const { block } = providerBlockForEdit(config, targetProviderId)
+        const models = providerBlockModels(block)
+        const currentModel = asObjectRecord(models[targetModelId]) ?? {}
+        models[targetModelId] = currentModel
+        if (value.trim()) {
+          currentModel.name = value
         } else {
           delete currentModel.name
         }
-        // Cleanup legacy schema written by earlier versions.
+        // `id` was the alias codeg's earlier releases wrote next to the key.
         delete currentModel.id
       })
     },
@@ -7915,37 +8113,44 @@ export function AcpAgentSettings() {
           { authMode: "chatgpt" }
         )
         const nextAuthJsonText = nextAuth.authJsonText
-        let nextConfigTomlText = updateTomlRootStringKey(
+        // Only `model_provider` goes. The save removes codeg's provider table
+        // when it holds codeg's keys alone, and keeps one the user wrote into
+        // whole (codex refuses a provider table missing its `name`).
+        const nextConfigTomlText = updateTomlRootStringKey(
           selectedDraft.codexConfigTomlText,
           "model_provider",
           ""
-        )
-        nextConfigTomlText = removeTomlSection(
-          nextConfigTomlText,
-          `model_providers.${CODEX_DEFAULT_MODEL_PROVIDER}`
         )
         const synced = extractCodexImportantValues(
           nextAuthJsonText,
           nextConfigTomlText
         )
-        updateSelectedDraft((current) => ({
-          ...current,
-          codexAuthMode: nextMode,
-          modelProviderId: null,
-          codexAuthJsonText: nextAuthJsonText,
-          codexConfigTomlText: nextConfigTomlText,
-          envText: patchEnvText(current.envText, {
-            OPENAI_API_KEY: "",
-            OPENAI_BASE_URL: "",
-          }),
-          apiBaseUrl: "",
-          apiKey: "",
-          model: synced.model,
-          codexModelProvider: synced.modelProvider,
-          codexProviderOptions: synced.providerOptions,
-          codexSupportsWebsockets: synced.supportsWebsockets,
-          codexDefaultModeRequestUserInput: synced.defaultModeRequestUserInput,
-        }))
+        updateSelectedDraft((current) => {
+          // A subscription runs on codex's own list: the provider source goes
+          // with the provider, persisted by the save.
+          const { catalog: _source, ...codexModelList } = current.codexModelList
+          void _source
+          return {
+            ...current,
+            codexModelList,
+            codexAuthMode: nextMode,
+            modelProviderId: null,
+            codexAuthJsonText: nextAuthJsonText,
+            codexConfigTomlText: nextConfigTomlText,
+            envText: patchEnvText(current.envText, {
+              OPENAI_API_KEY: "",
+              OPENAI_BASE_URL: "",
+            }),
+            apiBaseUrl: "",
+            apiKey: "",
+            model: synced.model,
+            codexModelProvider: synced.modelProvider,
+            codexProviderOptions: synced.providerOptions,
+            codexSupportsWebsockets: synced.supportsWebsockets,
+            codexDefaultModeRequestUserInput:
+              synced.defaultModeRequestUserInput,
+          }
+        })
         return
       }
 
@@ -7988,29 +8193,60 @@ export function AcpAgentSettings() {
       // `next` arrives already pruned of exclusions that no longer name a
       // listable official, so a plain count is the *effective* customization —
       // codeg only takes over codex's model table when something really deviates.
-      const hasCatalog =
-        next.customs.length > 0 || (next.excludedOfficials?.length ?? 0) > 0
-      updateSelectedDraft((current) => {
-        let toml = updateTomlRootStringKey(
-          current.codexConfigTomlText,
-          "model",
-          defaultSlug
-        )
-        toml = updateTomlRootStringKey(
-          toml,
-          "model_catalog_json",
-          hasCatalog ? "codeg-model-catalog.json" : ""
-        )
-        return {
-          ...current,
-          codexModelList: next,
-          model: defaultSlug,
-          codexConfigTomlText: toml,
-        }
-      })
+      const managed =
+        next.customs.length > 0 ||
+        (next.excludedOfficials?.length ?? 0) > 0 ||
+        !!next.catalog
+      updateSelectedDraft((current) => ({
+        ...current,
+        codexModelList: next,
+        model: defaultSlug,
+        // While codeg publishes a catalog, `model_catalog_json` and root
+        // `model` are the backend's, written from this list on save, so the
+        // text carries root `model` as it was loaded — a star placed before
+        // the list became customized must not read as a hand edit. Otherwise
+        // the star is root `model`.
+        codexConfigTomlText: managed
+          ? withRootModelOf(
+              current.codexConfigTomlText,
+              current.codexConfigTomlBaseline
+            )
+          : updateTomlRootStringKey(
+              current.codexConfigTomlText,
+              "model",
+              defaultSlug
+            ),
+      }))
     },
     [updateSelectedDraft]
   )
+
+  // Where the Codex model editor takes a provider's own list from: the bound
+  // provider (its key, read-only), or the panel's API URL and key.
+  const codexCatalogEndpoint = useMemo<CodexCatalogEndpoint | null>(() => {
+    if (!selectedDraft || selectedAgent?.agent_type !== "codex") return null
+    if (selectedDraft.codexAuthMode === "model_provider") {
+      const provider = modelProviders.find(
+        (p) => p.id === selectedDraft.modelProviderId
+      )
+      if (!provider) return null
+      return {
+        baseUrl: provider.api_url,
+        keySource: { kind: "provider", providerId: provider.id },
+        showStatus: true,
+        managedBy: provider.name,
+      }
+    }
+    if (selectedDraft.codexAuthMode === "api_key") {
+      const apiKey = selectedDraft.apiKey.trim()
+      return {
+        baseUrl: selectedDraft.apiBaseUrl,
+        keySource: apiKey ? { kind: "inline", apiKey } : null,
+        showStatus: true,
+      }
+    }
+    return null
+  }, [selectedAgent?.agent_type, selectedDraft, modelProviders])
 
   const handleCodexImportantConfigChange = useCallback(
     (key: "apiBaseUrl" | "apiKey" | "model", value: string) => {
@@ -8227,14 +8463,14 @@ export function AcpAgentSettings() {
               await persistConfig("codex", draft.configText, {
                 codexAuthJsonText: authJson,
                 codexConfigTomlText: draft.codexConfigTomlText,
+                codexConfigTomlBaseline: draft.codexConfigTomlBaseline,
                 codexModelCatalog:
                   serializeCodexModelConfig(draft.codexModelList) ?? "",
                 codexSandbox: codexSandboxSaveConfig(draft),
               })
             } catch (err) {
-              const msg = toErrorMessage(err)
               toast.error(t("codex.loginSaveFailed"), {
-                description: msg,
+                description: describeCodexSaveError(err, tCatalog),
               })
             }
           }
@@ -8266,6 +8502,7 @@ export function AcpAgentSettings() {
     persistEnv,
     updateSelectedDraft,
     t,
+    tCatalog,
   ])
 
   useEffect(() => {
@@ -8688,6 +8925,33 @@ export function AcpAgentSettings() {
                       aria-label={t("hostTools.label")}
                     />
                   </div>
+                  {selectedAgent.agent_type === "claude_code" && (
+                    <div className="flex items-start justify-between gap-3 rounded-md border bg-muted/10 p-3">
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium">
+                          {t("claude.thinkingSummaries")}
+                        </label>
+                        <p className="text-2xs text-muted-foreground">
+                          {t("claude.thinkingSummariesHint")}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={claudeThinkingSummariesEnabled(
+                          selectedDraft.envText
+                        )}
+                        onCheckedChange={(checked) => {
+                          updateSelectedDraft((current) => ({
+                            ...current,
+                            envText: setClaudeThinkingSummaries(
+                              current.envText,
+                              checked
+                            ),
+                          }))
+                        }}
+                        aria-label={t("claude.thinkingSummaries")}
+                      />
+                    </div>
+                  )}
                   <div className="flex justify-end">
                     <Button
                       size="sm"
@@ -8727,6 +8991,136 @@ export function AcpAgentSettings() {
                     </Button>
                   </div>
                 </div>
+
+                {selectedAgent.system_instructions_file_path &&
+                  (() => {
+                    const instructionsPath =
+                      selectedAgent.system_instructions_file_path
+                    const { dir: instructionsDir, name: instructionsFile } =
+                      splitInstructionsPath(instructionsPath)
+                    const instructionsDirty =
+                      selectedDraft.systemInstructionsText !==
+                      selectedDraft.systemInstructionsBaseline
+                    return (
+                      <div className="space-y-3 rounded-md border bg-muted/10 p-3">
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="agent-system-instructions"
+                            className="text-xs font-medium"
+                          >
+                            {t("systemInstructions.label")}
+                          </label>
+                          <p className="text-2xs text-muted-foreground">
+                            {t("systemInstructions.hint")}
+                          </p>
+                        </div>
+                        {/* The file name is what tells the user which file
+                            this is (CLAUDE.md, GEMINI.md, AGENTS.md …), so a
+                            long path gives up its directory, never the name. */}
+                        <div className="flex items-center gap-1.5 rounded-md border bg-background/60 py-0.5 ps-2 pe-0.5">
+                          <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span
+                            dir="ltr"
+                            className="flex min-w-0 flex-1 font-mono text-2xs"
+                            title={instructionsPath}
+                          >
+                            {instructionsDir && (
+                              <span className="truncate text-muted-foreground">
+                                {instructionsDir}
+                              </span>
+                            )}
+                            <span className="shrink-0 text-foreground">
+                              {instructionsFile}
+                            </span>
+                          </span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 shrink-0 p-0"
+                            title={t("systemInstructions.copyPath")}
+                            aria-label={t("systemInstructions.copyPath")}
+                            onClick={async () => {
+                              const ok =
+                                await copyTextToClipboard(instructionsPath)
+                              if (ok) {
+                                toast.success(
+                                  t("systemInstructions.pathCopied")
+                                )
+                              }
+                            }}
+                          >
+                            <Copy className="h-3 w-3" />
+                          </Button>
+                        </div>
+                        <Textarea
+                          id="agent-system-instructions"
+                          value={selectedDraft.systemInstructionsText}
+                          onChange={(event) => {
+                            updateSelectedDraft((current) => ({
+                              ...current,
+                              systemInstructionsText: event.target.value,
+                            }))
+                          }}
+                          placeholder={t("systemInstructions.placeholder")}
+                          className="min-h-40 max-h-[28rem] overflow-y-auto rounded-md bg-background/60 font-mono text-xs leading-relaxed md:text-xs"
+                          spellCheck={false}
+                          disabled={selectedIsSavingInstructions}
+                        />
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          {instructionsDirty && (
+                            <span className="me-auto flex items-center gap-1.5 text-2xs text-muted-foreground">
+                              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                              {t("systemInstructions.unsaved")}
+                            </span>
+                          )}
+                          {instructionsDirty && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              disabled={selectedIsSavingInstructions}
+                              onClick={() => {
+                                updateSelectedDraft((current) => ({
+                                  ...current,
+                                  systemInstructionsText:
+                                    current.systemInstructionsBaseline,
+                                }))
+                              }}
+                            >
+                              <Undo2 className="h-3.5 w-3.5" />
+                              {t("systemInstructions.discard")}
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            disabled={
+                              selectedIsSavingInstructions || !instructionsDirty
+                            }
+                            onClick={() =>
+                              persistSystemInstructions(
+                                selectedAgent.agent_type,
+                                selectedDraft.systemInstructionsText,
+                                instructionsPath
+                              )
+                            }
+                          >
+                            {selectedIsSavingInstructions ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                {t("actions.saving")}
+                              </>
+                            ) : (
+                              <>
+                                <Save className="h-3.5 w-3.5" />
+                                {t("actions.saveSystemInstructions")}
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    )
+                  })()}
 
                 {selectedAgent.agent_type === "codex" ? (
                   <div className="space-y-3 rounded-md border bg-muted/10 p-3">
@@ -8923,7 +9317,7 @@ export function AcpAgentSettings() {
                       selectedDraft.codexAuthMode === "model_provider") && (
                       <div className="space-y-1.5">
                         <label className="text-2xs text-muted-foreground">
-                          API URL
+                          {t("codex.apiUrlLabel")}
                         </label>
                         <Input
                           value={selectedDraft.apiBaseUrl}
@@ -8945,7 +9339,7 @@ export function AcpAgentSettings() {
                       selectedDraft.codexAuthMode === "model_provider") && (
                       <div className="space-y-1.5">
                         <label className="text-2xs text-muted-foreground">
-                          API Key
+                          {t("codex.apiKeyLabel")}
                         </label>
                         <div className="flex items-center gap-2">
                           <Input
@@ -9002,7 +9396,19 @@ export function AcpAgentSettings() {
                           readOnly={
                             selectedDraft.codexAuthMode === "model_provider"
                           }
+                          endpoint={codexCatalogEndpoint}
                         />
+                        {selectedDraft.codexAuthMode === "api_key" && (
+                          <CodexSavePreview
+                            configToml={selectedDraft.codexConfigTomlText}
+                            authJson={selectedDraft.codexAuthJsonText}
+                            modelList={
+                              serializeCodexModelConfig(
+                                selectedDraft.codexModelList
+                              ) ?? ""
+                            }
+                          />
+                        )}
                       </div>
                     )}
 
@@ -9117,15 +9523,26 @@ export function AcpAgentSettings() {
                                 {t(`codex.approvalPolicy_${value}`)}
                               </SelectItem>
                             ))}
+                            {/* Listed only so the trigger can name the value
+                                config.toml holds; it cannot be picked. */}
+                            {selectedDraft.codexApprovalPolicy ===
+                            CODEX_RETIRED_APPROVAL_POLICY ? (
+                              <SelectItem
+                                value={CODEX_RETIRED_APPROVAL_POLICY}
+                                disabled
+                              >
+                                {t("codex.approvalPolicy_untrusted")}
+                              </SelectItem>
+                            ) : null}
                           </SelectContent>
                         </Select>
-                        {/* `untrusted` has no equivalent in codex-acp's three
-                            approval presets, so an ACP session cannot honor it
-                            (#442). Say so where the user picks it, rather than
-                            letting it look effective. */}
-                        {selectedDraft.codexApprovalPolicy === "untrusted" ? (
-                          <p className="text-3xs text-yellow-500">
-                            {t("codex.approvalPolicyUntrustedAcpWarning")}
+                        {/* codex refuses to load a config carrying
+                            `untrusted`, so with it in config.toml no Codex
+                            session starts, here or in the Codex CLI. */}
+                        {selectedDraft.codexApprovalPolicy ===
+                        CODEX_RETIRED_APPROVAL_POLICY ? (
+                          <p className="text-3xs text-destructive">
+                            {t("codex.approvalPolicyUntrustedRetired")}
                           </p>
                         ) : null}
                       </div>
@@ -9325,6 +9742,12 @@ model_provider = "codeg"
 base_url = "https://api.openai.com/v1"`}
                         className="min-h-40 max-h-80 font-mono text-xs"
                       />
+                      {selectedDraft.codexAuthMode !== "chatgpt_subscription" &&
+                        codexListIsManaged(selectedDraft.codexModelList) && (
+                          <p className="text-2xs text-muted-foreground">
+                            {t("codex.managedKeysHint")}
+                          </p>
+                        )}
                     </div>
 
                     <div className="flex justify-end">
@@ -9368,6 +9791,8 @@ base_url = "https://api.openai.com/v1"`}
                                     selectedDraft.codexAuthJsonText,
                                   codexConfigTomlText:
                                     selectedDraft.codexConfigTomlText,
+                                  codexConfigTomlBaseline:
+                                    selectedDraft.codexConfigTomlBaseline,
                                   codexModelCatalog:
                                     serializeCodexModelConfig(
                                       selectedDraft.codexModelList
@@ -9376,6 +9801,12 @@ base_url = "https://api.openai.com/v1"`}
                                     codexSandboxSaveConfig(selectedDraft),
                                 }
                               )
+                            )
+                            // The backend wrote the keys it manages (catalog,
+                            // `model_catalog_json`, root `model`); start the
+                            // next edit from what is on disk.
+                            .then(() =>
+                              reseedAgentDraft("codex", selectedDraft)
                             )
                             .then(() => {
                               toast.success(t("toasts.codexSaved"), {
@@ -9387,9 +9818,11 @@ base_url = "https://api.openai.com/v1"`}
                                 "[Settings] save codex native config failed:",
                                 err
                               )
-                              const message = toErrorMessage(err)
                               toast.error(t("toasts.saveCodexNativeFailed"), {
-                                description: message,
+                                description: describeCodexSaveError(
+                                  err,
+                                  tCatalog
+                                ),
                               })
                             })
                         }}
@@ -9494,14 +9927,15 @@ base_url = "https://api.openai.com/v1"`}
                       <label className="text-2xs text-muted-foreground">
                         Model
                       </label>
-                      <Input
+                      <ModelIdInputWithFetch
                         value={selectedDraft.model}
                         readOnly={
                           selectedDraft.geminiAuthMode === "model_provider"
                         }
-                        onChange={(event) => {
-                          handleGeminiFieldChange("model", event.target.value)
+                        onChange={(value) => {
+                          handleGeminiFieldChange("model", value)
                         }}
+                        state={geminiProviderModels}
                         placeholder="gemini-3-pro-preview"
                       />
                       <p className="text-2xs text-muted-foreground">
@@ -9810,14 +10244,27 @@ base_url = "https://api.openai.com/v1"`}
                           />
                           {t("openCode.refreshCatalog")}
                         </Button>
-                        {openCodeCatalogLoading &&
-                          openCodeCatalog.length === 0 && (
-                            <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                              {t("openCode.connect.loading")}
-                            </span>
-                          )}
+                        {((openCodeCatalogLoading &&
+                          openCodeCatalog.length === 0) ||
+                          openCodeIntegrationsLoading) && (
+                          <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            {t("openCode.connect.loading")}
+                          </span>
+                        )}
                       </div>
+
+                      {!selectedOpenCodeInstalled ? (
+                        <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-2xs text-amber-500">
+                          {t("openCode.credentialsNeedInstall")}
+                        </p>
+                      ) : (
+                        openCodeIntegrationsError && (
+                          <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-2xs text-amber-500">
+                            {openCodeIntegrationsError}
+                          </p>
+                        )
+                      )}
 
                       {openCodeWellKnownConnected.length === 0 ? (
                         <div className="text-2xs text-muted-foreground">
@@ -9841,13 +10288,29 @@ base_url = "https://api.openai.com/v1"`}
                                   <span className="text-3xs text-muted-foreground">
                                     {provider.id}
                                   </span>
-                                  <Badge variant="outline" className="text-3xs">
-                                    {provider.authKind === "oauth"
+                                  <Badge
+                                    variant="outline"
+                                    className="text-3xs"
+                                    title={provider.statusMessage ?? undefined}
+                                  >
+                                    {provider.connection === "oauth"
                                       ? t("openCode.authKindOauth")
-                                      : provider.authKind === "api"
-                                        ? t("openCode.authKindApi")
-                                        : t("openCode.authKindNone")}
+                                      : provider.connection === "env"
+                                        ? t("openCode.authKindEnv", {
+                                            name: provider.envName ?? "",
+                                          })
+                                        : provider.connection === "none"
+                                          ? t("openCode.authKindNone")
+                                          : t("openCode.authKindApi")}
                                   </Badge>
+                                  {provider.statusMessage && (
+                                    <span className="truncate text-3xs text-amber-500">
+                                      {provider.statusMessage}
+                                    </span>
+                                  )}
+                                  {openCodeCredentialBusy === provider.id && (
+                                    <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                                  )}
                                   {!provider.inCatalog && (
                                     <Badge
                                       variant="secondary"
@@ -9871,25 +10334,44 @@ base_url = "https://api.openai.com/v1"`}
                                       { providerId: provider.id }
                                     )}
                                   />
-                                  {provider.authKind !== "oauth" && (
-                                    <Button
-                                      type="button"
-                                      size="xs"
-                                      variant="ghost"
-                                      onClick={() => {
-                                        // Top list is well-known only → the
-                                        // guided dialog edits the key/base URL.
-                                        setOpenCodeEditProviderId(provider.id)
-                                        setOpenCodeConnectOpen(true)
-                                      }}
-                                    >
-                                      {t("openCode.editConfig")}
-                                    </Button>
-                                  )}
+                                  {provider.connection !== "oauth" &&
+                                    provider.connection !== "external" && (
+                                      <Button
+                                        type="button"
+                                        size="xs"
+                                        variant="ghost"
+                                        disabled={
+                                          openCodeCredentialBusy !== null
+                                        }
+                                        onClick={() => {
+                                          // Top list is models.dev only → the
+                                          // guided dialog edits the key/base URL.
+                                          setOpenCodeEditProviderId(provider.id)
+                                          setOpenCodeConnectOpen(true)
+                                        }}
+                                      >
+                                        {t("openCode.editConfig")}
+                                      </Button>
+                                    )}
                                   <Button
                                     type="button"
                                     size="xs"
                                     variant="outline"
+                                    // An environment variable is not codeg's
+                                    // to remove; it is unset where it is set.
+                                    disabled={
+                                      openCodeCredentialBusy !== null ||
+                                      (provider.credentialCount === 0 &&
+                                        !provider.hasConfigBlock)
+                                    }
+                                    title={
+                                      provider.credentialCount === 0 &&
+                                      provider.envName
+                                        ? t("openCode.envConnectionHint", {
+                                            name: provider.envName,
+                                          })
+                                        : undefined
+                                    }
                                     onClick={() => {
                                       void handleOpenCodeDisconnect(
                                         provider.id,
@@ -9912,11 +10394,23 @@ base_url = "https://api.openai.com/v1"`}
                           setOpenCodeConnectOpen(o)
                           if (!o) setOpenCodeEditProviderId(null)
                         }}
+                        integrations={openCodeIntegrations}
+                        integrationsLoading={openCodeIntegrationsLoading}
+                        integrationsError={
+                          selectedOpenCodeInstalled
+                            ? openCodeIntegrationsError
+                            : t("openCode.credentialsNeedInstall")
+                        }
                         catalog={openCodeCatalog}
-                        catalogLoading={openCodeCatalogLoading}
-                        configText={selectedDraft.configText}
-                        authJsonText={selectedDraft.openCodeAuthJsonText}
                         editProviderId={openCodeEditProviderId}
+                        editBaseUrl={
+                          (openCodeEditProviderId &&
+                            selectedOpenCodeConfig?.providers[
+                              openCodeEditProviderId
+                            ]?.baseUrl) ||
+                          ""
+                        }
+                        baseUrlEditable={(id) => openCodeCatalogIds.has(id)}
                         onConnect={applyOpenCodeConnect}
                       />
 
@@ -9927,9 +10421,7 @@ base_url = "https://api.openai.com/v1"`}
                           selectedOpenCodeConfig?.providerIds ?? []
                         }
                         catalogIds={openCodeCatalog.map((p) => p.id)}
-                        configText={selectedDraft.configText}
-                        authJsonText={selectedDraft.openCodeAuthJsonText}
-                        onConnect={applyOpenCodeConnect}
+                        onSubmit={applyOpenCodeCustomProvider}
                       />
 
                       <div className="space-y-1 border-t pt-2">
@@ -9972,15 +10464,9 @@ base_url = "https://api.openai.com/v1"`}
                               selectedOpenCodeConfig.providers[providerId]
                             if (!provider) return null
                             const expanded = openCodeProviderId === providerId
-                            const isDisabled =
-                              selectedOpenCodeConfig.disabledProviders.includes(
-                                providerId
-                              ) ||
-                              (selectedOpenCodeConfig.enabledProviders.length >
-                                0 &&
-                                !selectedOpenCodeConfig.enabledProviders.includes(
-                                  providerId
-                                ))
+                            const isDisabled = !provider.enabled
+                            const connection =
+                              openCodeConnectedById.get(providerId)
                             return (
                               <Collapsible
                                 key={providerId}
@@ -10078,7 +10564,9 @@ base_url = "https://api.openai.com/v1"`}
                                       </div>
                                       <div className="space-y-1.5">
                                         <label className="text-2xs text-muted-foreground">
-                                          provider.npm
+                                          {provider.shape === "native"
+                                            ? "package"
+                                            : "npm"}
                                         </label>
                                         <Select
                                           value={
@@ -10118,23 +10606,9 @@ base_url = "https://api.openai.com/v1"`}
                                       </div>
                                       <div className="space-y-1.5">
                                         <label className="text-2xs text-muted-foreground">
-                                          provider.api
-                                        </label>
-                                        <Input
-                                          value={provider.api}
-                                          onChange={(event) => {
-                                            handleOpenCodeProviderFieldChange(
-                                              providerId,
-                                              "api",
-                                              event.target.value
-                                            )
-                                          }}
-                                          placeholder="openai.responses"
-                                        />
-                                      </div>
-                                      <div className="space-y-1.5">
-                                        <label className="text-2xs text-muted-foreground">
-                                          provider.options.baseURL
+                                          {provider.shape === "native"
+                                            ? "settings.baseURL"
+                                            : "options.baseURL"}
                                         </label>
                                         <Input
                                           value={provider.baseUrl}
@@ -10148,57 +10622,44 @@ base_url = "https://api.openai.com/v1"`}
                                           placeholder="https://api.example.com/v1"
                                         />
                                       </div>
-                                      <div className="space-y-1.5 md:col-span-2">
+                                      <div className="space-y-1.5">
                                         <label className="text-2xs text-muted-foreground">
-                                          provider.options.apiKey
+                                          {t("openCode.connect.apiKey")}
                                         </label>
                                         <div className="flex items-center gap-2">
-                                          <Input
-                                            type={
-                                              showApiKeys[
-                                                selectedAgent.agent_type
-                                              ]
-                                                ? "text"
-                                                : "password"
-                                            }
-                                            value={provider.apiKey}
-                                            onChange={(event) => {
-                                              handleOpenCodeProviderFieldChange(
-                                                providerId,
-                                                "apiKey",
-                                                event.target.value
-                                              )
-                                            }}
-                                            placeholder="sk-..."
-                                          />
+                                          <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">
+                                            {connection?.connection === "env"
+                                              ? t("openCode.authKindEnv", {
+                                                  name:
+                                                    connection.envName ?? "",
+                                                })
+                                              : (connection?.credentialCount ??
+                                                    0) > 0
+                                                ? t("openCode.keyStored")
+                                                : t("openCode.keyMissing")}
+                                          </span>
                                           <Button
                                             type="button"
                                             variant="outline"
                                             size="sm"
-                                            onClick={() => {
-                                              setShowApiKeys((prev) => ({
-                                                ...prev,
-                                                [selectedAgent.agent_type]:
-                                                  !prev[
-                                                    selectedAgent.agent_type
-                                                  ],
-                                              }))
-                                            }}
-                                            title={
-                                              showApiKeys[
-                                                selectedAgent.agent_type
-                                              ]
-                                                ? t("actions.hideKey")
-                                                : t("actions.showKey")
+                                            disabled={
+                                              !selectedOpenCodeInstalled ||
+                                              openCodeCredentialBusy !== null
                                             }
+                                            onClick={() => {
+                                              setOpenCodeEditProviderId(
+                                                providerId
+                                              )
+                                              setOpenCodeConnectOpen(true)
+                                            }}
                                           >
-                                            {showApiKeys[
-                                              selectedAgent.agent_type
-                                            ] ? (
-                                              <EyeOff className="h-3.5 w-3.5" />
+                                            {openCodeCredentialBusy ===
+                                            providerId ? (
+                                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                             ) : (
-                                              <Eye className="h-3.5 w-3.5" />
+                                              <Plug className="h-3.5 w-3.5" />
                                             )}
+                                            {t("openCode.setApiKey")}
                                           </Button>
                                         </div>
                                       </div>
@@ -10281,6 +10742,39 @@ base_url = "https://api.openai.com/v1"`}
                                             >
                                               {t("openCode.addModel")}
                                             </Button>
+                                            {openCodeModelsProtocol(
+                                              provider.npm
+                                            ) && (
+                                              <ProviderModelsPicker
+                                                input={{
+                                                  protocol:
+                                                    openCodeModelsProtocol(
+                                                      provider.npm
+                                                    ) ?? "openai",
+                                                  baseUrl: provider.baseUrl,
+                                                  // The key stays in
+                                                  // OpenCode's credential
+                                                  // store; the backend reads
+                                                  // it there to ask.
+                                                  storedKey:
+                                                    (connection?.credentialCount ??
+                                                      0) > 0
+                                                      ? {
+                                                          kind: "opencodeCredential",
+                                                          integrationId:
+                                                            providerId,
+                                                        }
+                                                      : null,
+                                                }}
+                                                configured={provider.modelIds}
+                                                onConfirm={(ids) =>
+                                                  handleOpenCodeSetModels(
+                                                    providerId,
+                                                    ids
+                                                  )
+                                                }
+                                              />
+                                            )}
                                           </div>
 
                                           {provider.modelIds.length === 0 ? (
@@ -10427,11 +10921,7 @@ base_url = "https://api.openai.com/v1"`}
                                         onClick={() => {
                                           persistConfig(
                                             selectedAgent.agent_type,
-                                            selectedDraft.configText,
-                                            {
-                                              openCodeAuthJsonText:
-                                                selectedDraft.openCodeAuthJsonText,
-                                            }
+                                            selectedDraft.configText
                                           )
                                             .then(() => {
                                               toast.success(
@@ -10545,11 +11035,7 @@ base_url = "https://api.openai.com/v1"`}
                         onClick={() => {
                           persistConfig(
                             selectedAgent.agent_type,
-                            selectedDraft.configText,
-                            {
-                              openCodeAuthJsonText:
-                                selectedDraft.openCodeAuthJsonText,
-                            }
+                            selectedDraft.configText
                           )
                             .then(() => {
                               toast.success(t("toasts.openCodeSaved"), {
@@ -10727,14 +11213,12 @@ base_url = "https://api.openai.com/v1"`}
                       <label className="text-2xs text-muted-foreground">
                         Model
                       </label>
-                      <Input
+                      <ModelIdInputWithFetch
                         value={selectedDraft.clineModel}
-                        onChange={(event) => {
-                          handleClineFieldChange(
-                            "clineModel",
-                            event.target.value
-                          )
+                        onChange={(value) => {
+                          handleClineFieldChange("clineModel", value)
                         }}
+                        state={clineProviderModels}
                         placeholder="claude-sonnet-5-5"
                       />
                     </div>
@@ -10762,6 +11246,19 @@ base_url = "https://api.openai.com/v1"`}
                           placeholder="https://api.openai.com/v1"
                         />
                       </div>
+                    )}
+
+                    {selectedDraft.clineProvider ===
+                      CLINE_CUSTOM_MODEL_PROVIDER && (
+                      <ModelIdListField
+                        ids={selectedDraft.clineModels ?? []}
+                        onChange={(ids) =>
+                          handleClineFieldChange("clineModels", ids)
+                        }
+                        state={clineProviderModels}
+                        title={tModels("clineList.title")}
+                        hint={tModels("clineList.hint")}
+                      />
                     )}
 
                     <div className="space-y-1.5">
@@ -11117,11 +11614,12 @@ base_url = "https://api.openai.com/v1"`}
                       <label className="text-2xs text-muted-foreground">
                         {t("hermes.modelName")}
                       </label>
-                      <Input
+                      <ModelIdInputWithFetch
                         value={selectedDraft.model}
-                        onChange={(event) =>
-                          handleHermesFieldChange("model", event.target.value)
+                        onChange={(value) =>
+                          handleHermesFieldChange("model", value)
                         }
+                        state={hermesProviderModels}
                         placeholder="moonshotai/kimi-k2"
                         disabled={selectedIsSavingConfig}
                       />
@@ -11359,6 +11857,8 @@ base_url = "https://api.openai.com/v1"`}
                       )
                     }
                   />
+                ) : selectedAgent.agent_type === "minimax_code" ? (
+                  <MiniMaxCodeConfigPanel />
                 ) : selectedAgent.agent_type === "kimi_code" ? (
                   <KimiCodeConfigPanel
                     agent={selectedAgent}
@@ -11425,6 +11925,12 @@ base_url = "https://api.openai.com/v1"`}
                       from. */}
                     <DeepSeekModelListEditor
                       launchModel={selectedAgent.env.DEEPSEEK_ACP_MODEL}
+                      endpoint={{
+                        baseUrl:
+                          selectedAgent.env.DEEPSEEK_BASE_URL?.trim() ||
+                          DEEPSEEK_DEFAULT_BASE_URL,
+                        apiKey: selectedAgent.env.DEEPSEEK_API_KEY ?? "",
+                      }}
                     />
                   </>
                 ) : selectedAgent.agent_type === "qoder" ? (
@@ -11733,18 +12239,17 @@ base_url = "https://api.openai.com/v1"`}
                           <label className="text-2xs text-muted-foreground">
                             {t("grok.customModelIdLabel")}
                           </label>
-                          <Input
+                          <ModelIdInputWithFetch
                             value={selectedDraft.grokCustomModelId}
-                            onChange={(event) =>
+                            onChange={(value) =>
                               updateSelectedDraft((current) => ({
                                 ...current,
-                                grokCustomModelId: event.target.value,
+                                grokCustomModelId: value,
                               }))
                             }
+                            state={grokProviderModels}
                             placeholder={t("grok.customModelIdPlaceholder")}
                             aria-label={t("grok.customModelIdLabel")}
-                            autoComplete="off"
-                            spellCheck={false}
                             disabled={grokSaving}
                           />
                           <p className="text-2xs text-muted-foreground">
@@ -11884,6 +12389,20 @@ base_url = "https://api.openai.com/v1"`}
                             {t("grok.customContextWindowHint")}
                           </p>
                         </div>
+
+                        <ModelIdListField
+                          ids={selectedDraft.grokCustomExtraModels}
+                          onChange={(ids) =>
+                            updateSelectedDraft((current) => ({
+                              ...current,
+                              grokCustomExtraModels: ids,
+                            }))
+                          }
+                          state={grokProviderModels}
+                          readOnly={grokSaving}
+                          title={tModels("grokList.title")}
+                          hint={tModels("grokList.hint")}
+                        />
 
                         {/* [model.<id>].reasoning_efforts — without levels from
                             here or from Grok's own model catalog (it never asks
@@ -12056,6 +12575,14 @@ base_url = "https://api.openai.com/v1"`}
                                 ...current,
                                 grokCustomReasoningEffortsBaseline:
                                   writtenLevels,
+                              }))
+                            }
+                            const writtenExtras =
+                              grokSave.grokStructured.customExtraModels
+                            if (writtenExtras) {
+                              updateSelectedDraft((current) => ({
+                                ...current,
+                                grokCustomExtraModelsBaseline: writtenExtras,
                               }))
                             }
                             // Independent second write (the API key lives in env).
@@ -12377,18 +12904,19 @@ base_url = "https://api.openai.com/v1"`}
                             <label className="text-2xs text-muted-foreground">
                               {t("claude.mainModel")}
                             </label>
-                            <Input
+                            <ModelIdInputWithFetch
                               value={selectedDraft.claudeMainModel}
                               readOnly={
                                 selectedDraft.claudeAuthMode ===
                                 "model_provider"
                               }
-                              onChange={(event) => {
+                              onChange={(value) => {
                                 handleImportantConfigChange(
                                   "claudeMainModel",
-                                  event.target.value
+                                  value
                                 )
                               }}
+                              state={claudeProviderModels}
                               placeholder="claude-sonnet-5-5"
                             />
                           </div>
@@ -12396,18 +12924,19 @@ base_url = "https://api.openai.com/v1"`}
                             <label className="text-2xs text-muted-foreground">
                               {t("claude.reasoningModel")}
                             </label>
-                            <Input
+                            <ModelIdInputWithFetch
                               value={selectedDraft.claudeReasoningModel}
                               readOnly={
                                 selectedDraft.claudeAuthMode ===
                                 "model_provider"
                               }
-                              onChange={(event) => {
+                              onChange={(value) => {
                                 handleImportantConfigChange(
                                   "claudeReasoningModel",
-                                  event.target.value
+                                  value
                                 )
                               }}
+                              state={claudeProviderModels}
                               placeholder="claude-opus-5-5"
                             />
                           </div>
@@ -12415,18 +12944,19 @@ base_url = "https://api.openai.com/v1"`}
                             <label className="text-2xs text-muted-foreground">
                               {t("claude.haikuDefaultModel")}
                             </label>
-                            <Input
+                            <ModelIdInputWithFetch
                               value={selectedDraft.claudeDefaultHaikuModel}
                               readOnly={
                                 selectedDraft.claudeAuthMode ===
                                 "model_provider"
                               }
-                              onChange={(event) => {
+                              onChange={(value) => {
                                 handleImportantConfigChange(
                                   "claudeDefaultHaikuModel",
-                                  event.target.value
+                                  value
                                 )
                               }}
+                              state={claudeProviderModels}
                               placeholder="claude-haiku-5-5"
                             />
                           </div>
@@ -12434,18 +12964,19 @@ base_url = "https://api.openai.com/v1"`}
                             <label className="text-2xs text-muted-foreground">
                               {t("claude.sonnetDefaultModel")}
                             </label>
-                            <Input
+                            <ModelIdInputWithFetch
                               value={selectedDraft.claudeDefaultSonnetModel}
                               readOnly={
                                 selectedDraft.claudeAuthMode ===
                                 "model_provider"
                               }
-                              onChange={(event) => {
+                              onChange={(value) => {
                                 handleImportantConfigChange(
                                   "claudeDefaultSonnetModel",
-                                  event.target.value
+                                  value
                                 )
                               }}
+                              state={claudeProviderModels}
                               placeholder="claude-sonnet-5-5"
                             />
                           </div>
@@ -12453,18 +12984,19 @@ base_url = "https://api.openai.com/v1"`}
                             <label className="text-2xs text-muted-foreground">
                               {t("claude.opusDefaultModel")}
                             </label>
-                            <Input
+                            <ModelIdInputWithFetch
                               value={selectedDraft.claudeDefaultOpusModel}
                               readOnly={
                                 selectedDraft.claudeAuthMode ===
                                 "model_provider"
                               }
-                              onChange={(event) => {
+                              onChange={(value) => {
                                 handleImportantConfigChange(
                                   "claudeDefaultOpusModel",
-                                  event.target.value
+                                  value
                                 )
                               }}
+                              state={claudeProviderModels}
                               placeholder="claude-opus-5-5"
                             />
                           </div>
@@ -12472,19 +13004,20 @@ base_url = "https://api.openai.com/v1"`}
                             <label className="text-2xs text-muted-foreground">
                               {t("claude.fableDefaultModel")}
                             </label>
-                            <Input
+                            <ModelIdInputWithFetch
                               value={selectedDraft.claudeDefaultFableModel}
                               readOnly={
                                 selectedDraft.claudeAuthMode ===
                                 "model_provider"
                               }
-                              onChange={(event) => {
+                              onChange={(value) => {
                                 handleImportantConfigChange(
                                   "claudeDefaultFableModel",
-                                  event.target.value
+                                  value
                                 )
                               }}
-                              placeholder="claude-fable-5-1"
+                              state={claudeProviderModels}
+                              placeholder="claude-fable-5-2"
                             />
                           </div>
                         </div>
@@ -12497,18 +13030,19 @@ base_url = "https://api.openai.com/v1"`}
                               <label className="text-2xs text-muted-foreground">
                                 {t("claude.customModelOption")}
                               </label>
-                              <Input
+                              <ModelIdInputWithFetch
                                 value={selectedDraft.claudeCustomModelOption}
                                 readOnly={
                                   selectedDraft.claudeAuthMode ===
                                   "model_provider"
                                 }
-                                onChange={(event) => {
+                                onChange={(value) => {
                                   handleImportantConfigChange(
                                     "claudeCustomModelOption",
-                                    event.target.value
+                                    value
                                   )
                                 }}
+                                state={claudeProviderModels}
                                 placeholder="my-gateway/claude-opus-5-5"
                               />
                             </div>
@@ -12559,6 +13093,46 @@ base_url = "https://api.openai.com/v1"`}
                             {t("claude.customModelOptionHint")}
                           </p>
                         </div>
+                        {selectedDraft.claudeAuthMode !==
+                          "official_subscription" && (
+                          <div className="space-y-2 border-t border-border/60 pt-3">
+                            <ClaudePickerModelsField
+                              ids={
+                                claudeBoundPickerModels ??
+                                selectedDraft.claudePickerModels
+                              }
+                              onChange={(ids) =>
+                                updateSelectedDraft((current) => ({
+                                  ...current,
+                                  claudePickerModels: ids,
+                                }))
+                              }
+                              state={
+                                selectedDraft.claudeAuthMode === "custom"
+                                  ? claudeProviderModels
+                                  : null
+                              }
+                              readOnly={claudeBoundPickerModels != null}
+                            />
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between rounded-md border px-3 py-2">
+                                <label className="text-2xs text-muted-foreground">
+                                  {t("claude.gatewayDiscovery")}
+                                </label>
+                                <Switch
+                                  checked={selectedDraft.claudeGatewayDiscovery}
+                                  onCheckedChange={
+                                    handleClaudeGatewayDiscoveryChange
+                                  }
+                                  aria-label={t("claude.gatewayDiscoveryAria")}
+                                />
+                              </div>
+                              <p className="text-2xs text-muted-foreground">
+                                {t("claude.gatewayDiscoveryHint")}
+                              </p>
+                            </div>
+                          </div>
+                        )}
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between rounded-md border px-3 py-2">
                             <label className="text-2xs text-muted-foreground">
@@ -12697,6 +13271,18 @@ base_url = "https://api.openai.com/v1"`}
                             configToSave = materialized.configText
                             envToSave = materialized.envText
                           }
+                          // The extra /model rows of an unbound Claude are
+                          // kept by codeg, not in a config file (a bound
+                          // provider keeps its own): stored once they moved.
+                          const pickerToSave =
+                            selectedAgent.agent_type === "claude_code" &&
+                            selectedDraft.modelProviderId == null &&
+                            !sameModelIds(
+                              selectedDraft.claudePickerModels,
+                              selectedDraft.claudePickerModelsBaseline
+                            )
+                              ? selectedDraft.claudePickerModels
+                              : null
                           persistEnv(
                             selectedAgent.agent_type,
                             selectedDraft.enabled,
@@ -12706,9 +13292,31 @@ base_url = "https://api.openai.com/v1"`}
                             .then(() =>
                               persistConfig(
                                 selectedAgent.agent_type,
-                                configToSave
+                                configToSave,
+                                {
+                                  // Only an edited text: an untouched one would
+                                  // write a stale copy over the file (or create
+                                  // an empty one).
+                                  systemInstructionsText:
+                                    selectedAgent.system_instructions_file_path &&
+                                    selectedDraft.systemInstructionsText !==
+                                      selectedDraft.systemInstructionsBaseline
+                                      ? selectedDraft.systemInstructionsText
+                                      : undefined,
+                                  systemInstructionsFilePath:
+                                    selectedAgent.system_instructions_file_path ??
+                                    undefined,
+                                }
                               )
                             )
+                            .then(async () => {
+                              if (!pickerToSave) return
+                              await acpUpdateClaudeModelPicker(pickerToSave)
+                              updateSelectedDraft((current) => ({
+                                ...current,
+                                claudePickerModelsBaseline: pickerToSave,
+                              }))
+                            })
                             .then(() => {
                               // Reflect the provider-authoritative rewrite AND the
                               // materialized hardening flags in the editors so the

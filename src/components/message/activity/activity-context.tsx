@@ -4,6 +4,7 @@ import { createContext, useContext, type ReactNode } from "react"
 
 import type { ActivityModel } from "@/lib/activity/types"
 import type { AdaptedContentPart } from "@/lib/adapters/ai-elements-adapter"
+import type { ActivityFoot } from "./timeline-foot"
 
 /**
  * What the timeline's rows need from the surface that renders them.
@@ -14,16 +15,30 @@ import type { AdaptedContentPart } from "@/lib/adapters/ai-elements-adapter"
  * mounts the timeline; importing it here would close an import cycle.
  */
 export interface ActivityRenderContextValue {
-  renderPart: (part: AdaptedContentPart, key: string) => ReactNode
+  /** `live`: the part is the prose the agent is writing right now — its
+   *  words fade in as they arrive. */
+  renderPart: (
+    part: AdaptedContentPart,
+    key: string,
+    live?: boolean
+  ) => ReactNode
   /** The reply is still being written. */
   isStreaming: boolean
   /** Failed steps a later step redid successfully (see `summarizeActivity`). */
   recoveredKeys: ReadonlySet<string>
-  /** Draw a nested timeline (a sub-agent's own steps) with the same wiring. */
-  renderNested: (model: ActivityModel, isStreaming: boolean) => ReactNode
+  /** Draw a nested timeline (a sub-agent's own steps) with the same wiring,
+   *  ending on the capsule that folds its host. */
+  renderNested: (
+    model: ActivityModel,
+    isStreaming: boolean,
+    foot?: ActivityFoot
+  ) => ReactNode
   /** Only rows still running are drawn — the folded turn's long-lived rows
    *  (delegations, sub-agents, background tasks that outlive the turn). */
   pinnedOnly: boolean
+  /** A list inside a step (a sub-agent's, a goal's): its prose and its foot
+   *  are not the reply's own, so they carry no motion keys (`ReplyMotion`). */
+  nested: boolean
 }
 
 const ActivityRenderContext = createContext<ActivityRenderContextValue | null>(

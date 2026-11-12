@@ -1,12 +1,13 @@
-//! OpenCode provider catalog backed by [models.dev](https://models.dev).
+//! OpenCode provider catalog backed by the models.dev registry.
 //!
-//! OpenCode resolves its built-in providers and their model lists from the
-//! models.dev registry (`https://models.dev/api.json`). To drive a guided
-//! "connect a provider" experience we mirror that catalog here, normalized to
-//! a slim shape the frontend can render.
+//! OpenCode resolves its built-in providers and their model lists from its
+//! own copy of the models.dev registry, `https://models.opencode.ai/api.json`
+//! (`OPENCODE_MODELS_URL` overrides it; the two serve the same document).
+//! To drive a guided "connect a provider" experience we mirror that catalog
+//! here, normalized to a slim shape the frontend can render.
 //!
 //! Resolution order (most fresh first):
-//! 1. live fetch of `models.dev/api.json` (when forced, or when the cache is
+//! 1. live fetch of that `api.json` (when forced, or when the cache is
 //!    stale), normalized and written back to the on-disk cache;
 //! 2. the on-disk cache under `<data_dir>/cache/opencode/models-dev-v2.json`;
 //! 3. the snapshot bundled into the binary, so the catalog is always available
@@ -19,8 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_error::AppCommandError;
 
-/// models.dev JSON API — the same source OpenCode itself reads.
-pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+/// The registry's JSON API, where OpenCode itself reads it (its default
+/// `OPENCODE_MODELS_URL` plus `/api.json`).
+pub const MODELS_DEV_URL: &str = "https://models.opencode.ai/api.json";
 
 /// Cache lifetime before we attempt a fresh fetch. Stale cache is still used as
 /// a fallback when the network is unavailable.
@@ -325,6 +327,29 @@ mod tests {
             )),
             "bundled snapshot has no cache read/write prices; regenerate it from models.dev"
         );
+    }
+
+    #[test]
+    fn bundled_snapshot_prices_claude_fable_5_2() {
+        // Claude Code 2.1.321 (claude-agent-acp 0.102.0) makes Fable 5.2 the
+        // `fable` model, so an offline install must price it too: $8/$40 per
+        // Mtok, $0.20 cache reads and $10 cache writes, as models.dev lists it.
+        let catalog = bundled_catalog();
+        let fable = catalog
+            .iter()
+            .find(|p| p.id == "anthropic")
+            .and_then(|p| p.models.iter().find(|m| m.id == "claude-fable-5-2"))
+            .expect("snapshot must list claude-fable-5-2 under anthropic");
+        assert_eq!(
+            (
+                fable.cost_in,
+                fable.cost_out,
+                fable.cost_cache_read,
+                fable.cost_cache_write
+            ),
+            (Some(8.0), Some(40.0), Some(0.2), Some(10.0))
+        );
+        assert_eq!(fable.context, Some(1_000_000));
     }
 
     #[test]

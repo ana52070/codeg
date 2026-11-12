@@ -47,6 +47,15 @@ pub struct ListIssuesParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct IssueDetailParams {
+    pub folder_id: i32,
+    pub number: i64,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TabCountParams {
     pub folder_id: i32,
     /// Which tab to count. Always the one NOT on screen — the visible tab's
@@ -136,6 +145,12 @@ pub struct CreateFromForgeParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateFromForgeIssuesParams {
+    pub draft: core::ForgeIssuesTaskDraft,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LookupParams {
     pub source_keys: Vec<String>,
 }
@@ -169,6 +184,16 @@ pub async fn forge_list_issues(
 ) -> Result<Json<crate::forge::ForgeIssueList>, AppCommandError> {
     Ok(Json(
         core::forge_list_issues_core(&state.db, params.folder_id, params.query).await?,
+    ))
+}
+
+pub async fn forge_issue_detail(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<IssueDetailParams>,
+) -> Result<Json<crate::forge::ForgeIssueRow>, AppCommandError> {
+    Ok(Json(
+        core::forge_issue_detail_core(&state.db, params.folder_id, params.number, params.account_id)
+            .await?,
     ))
 }
 
@@ -277,6 +302,16 @@ pub async fn work_task_create_from_forge(
 ) -> Result<Json<core::ForgeCreateResult>, AppCommandError> {
     Ok(Json(
         core::work_task_create_from_forge_core(&state.emitter, &state.db, params.draft).await?,
+    ))
+}
+
+pub async fn work_task_create_from_forge_issues(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<CreateFromForgeIssuesParams>,
+) -> Result<Json<core::ForgeIssuesCreateResult>, AppCommandError> {
+    Ok(Json(
+        core::work_task_create_from_forge_issues_core(&state.emitter, &state.db, params.draft)
+            .await?,
     ))
 }
 

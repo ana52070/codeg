@@ -29,9 +29,12 @@ import {
   defaultRemarkPlugins,
 } from "streamdown"
 import { markdownLinkComponents } from "./markdown-link"
-import { messageBlockComponents } from "./json-render-pre"
+import { messageBlockComponents, useAssistantReply } from "./json-render-pre"
+import { useChatHtmlEnabled } from "@/lib/chat-html-prefs"
+import { createChatHtmlProcessor } from "@/lib/chat-html-markdown"
 import { scrollportComponents } from "./markdown-scrollport"
 import { maskLiteralSpans } from "./markdown-mask"
+import { normalizeInlineDollarMath } from "./inline-dollar-math"
 import { rehypePluginsAllowingCodeg } from "./rehype-allow-codeg"
 import { remarkTrimCjkAutolinkTail } from "./remark-cjk-autolink-tail"
 import { withRelativeFileLinks } from "./rehype-relative-file-links"
@@ -358,6 +361,7 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>
 // remark-math uses dollar delimiters. `\[...\]` / `\(...\)` are rewritten
 // to `$$...$$`. Single-dollar `$...$` is disabled (`singleDollarTextMath:
 // false`) so currency (`$9.99`) and shell vars (`$HOME`, `$1`) stay prose.
+// Only tightly delimited single-dollar formulas are normalized explicitly.
 //
 // A single-line `$$x$$` inside a paragraph stays *inline* math (mdast tags
 // every math-text node `math-inline` regardless of dollar count). The one
@@ -401,7 +405,7 @@ export function normalizeMathDelimiters(text: string): string {
       const open = atContentStart ? MATH_FENCE_PAD : ""
       return `${open}$$${inner}${MATH_FENCE_PAD}$$`
     })
-  return restore(normalized)
+  return normalizeInlineDollarMath(restore(normalized))
 }
 
 function isSpaceOrTab(code: number): boolean {
@@ -549,12 +553,17 @@ function MessageResponseImpl({
   remend,
   ...props
 }: MessageResponseProps) {
+  const inReply = useAssistantReply()
+  const htmlEnabled = useChatHtmlEnabled() && inReply
+  const processHtml = useMemo(() => createChatHtmlProcessor(), [])
   const normalized = useMemo(
     () =>
       typeof children === "string"
-        ? normalizeMathDelimiters(children)
+        ? htmlEnabled
+          ? processHtml(children, mode === "streaming", normalizeMathDelimiters)
+          : normalizeMathDelimiters(children)
         : children,
-    [children]
+    [children, htmlEnabled, mode, processHtml]
   )
   const plugins = useStreamdownPlugins(
     typeof normalized === "string" ? normalized : undefined
@@ -563,7 +572,9 @@ function MessageResponseImpl({
   return (
     <Streamdown
       className={cn(
-        "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:ps-2 [&_ol]:ps-2",
+        // `chat-markdown`: while it streams, its blocks keep the spacing they
+        // settle with (globals.css).
+        "chat-markdown size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:ps-2 [&_ol]:ps-2",
         // Each block takes the direction of its own text (`dir="auto"`
         // below), so indents and rules go on the logical start side. An item
         // re-states `text-align: start`: the UA gives <li>
@@ -621,7 +632,12 @@ export const MessageResponse = memo(
     (prevProps.mode ?? FINISHED_MODE) === (nextProps.mode ?? FINISHED_MODE) &&
     (prevProps.parseIncompleteMarkdown ??
       FINISHED_PARSE_INCOMPLETE_MARKDOWN) ===
-      (nextProps.parseIncompleteMarkdown ?? FINISHED_PARSE_INCOMPLETE_MARKDOWN)
+      (nextProps.parseIncompleteMarkdown ??
+        FINISHED_PARSE_INCOMPLETE_MARKDOWN) &&
+    // The prose being written wraps its new characters to fade them in
+    // (`animated` + `isAnimating`); done, it drops the wrapping.
+    (prevProps.isAnimating ?? false) === (nextProps.isAnimating ?? false) &&
+    prevProps.animated === nextProps.animated
 )
 
 MessageResponse.displayName = "MessageResponse"

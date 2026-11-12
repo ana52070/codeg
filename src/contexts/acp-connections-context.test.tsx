@@ -23,9 +23,12 @@ import {
   IDLE_SWEEP_INTERVAL_MS,
 } from "@/lib/constants"
 import { DelegationProvider } from "@/contexts/delegation-context"
+import { TaskProvider } from "@/contexts/task-context"
+import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
 import { parsePermissionToolCall } from "@/lib/permission-request"
 import { subscribe } from "@/lib/platform"
 import { saveConfigPreference } from "@/lib/selector-prefs-storage"
+import { inferLiveToolName } from "@/lib/tool-call-normalization"
 import type { AttachHandlers } from "@/lib/transport/types"
 import {
   resetAppWorkspaceStore,
@@ -230,6 +233,7 @@ beforeEach(() => {
     lastErrorLevel: "error",
     eventSeq: 0,
     activeDelegations: [],
+    delegatedChildren: [],
   })
   // Agent is installed + available so the connect preflight passes.
   h.acpGetAgentStatus.mockResolvedValue({
@@ -310,6 +314,7 @@ function snapshotBase() {
     configStaleKind: null,
     backgroundOutstanding: 0,
     activeDelegations: [],
+    delegatedChildren: [],
     lastError: null as string | null,
     lastErrorCode: null as string | null,
     lastErrorLevel: "error",
@@ -696,6 +701,123 @@ describe("AcpConnectionsProvider preview-tab release (disconnectIfIdle)", () => 
     expect(h.acpDisconnect).not.toHaveBeenCalled()
   })
 
+  // The transcript watcher only counts work that leaves a Claude transcript
+  // trace. A codex background terminal (or a Claude Monitor task) is announced
+  // on the AIR async-task channel and nowhere else, so the watcher's count stays
+  // 0 while it runs — the gate has to read the task table as well.
+  it("keeps an owner alive while an AIR async task is still running", async () => {
+    const handlers = await connectOwner()
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "connected",
+    })
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "async_task",
+      delta: {
+        task_id: "call_bg_1",
+        spawned: true,
+        name: "npm run dev",
+        task_type: "shell",
+        can_stop: true,
+      },
+    })
+    expect(h.store!.getConnection(TAB)?.backgroundOutstanding).toBe(0)
+
+    await act(async () => {
+      await h.actions!.disconnectIfIdle(TAB)
+    })
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+
+    // Settled, it is an idle owner like any other.
+    emitAcpEvent(handlers, {
+      seq: 3,
+      connection_id: "spawned-conn",
+      type: "async_task",
+      delta: { task_id: "call_bg_1", spawned: false, state: "completed" },
+    })
+    await act(async () => {
+      await h.actions!.disconnectIfIdle(TAB)
+    })
+    expect(h.acpDisconnect).toHaveBeenCalledWith("spawned-conn")
+  })
+
+  it("keeps an owner alive while Remote Control is on", async () => {
+    const handlers = await connectOwner()
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "remote_control",
+      remote_control: { session_url: "https://claude.ai/code/session_01" },
+    })
+
+    await act(async () => {
+      await h.actions!.disconnectIfIdle(TAB)
+    })
+
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+  })
+
+  // Ending a parent cancels every codeg sub-agent it has in flight, and an
+  // async delegation keeps running after the parent's turn is over.
+  it("keeps the parent of a running delegation alive until it completes", async () => {
+    const handlers = await connectOwner()
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "connected",
+    })
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "delegation_child_running",
+      child_connection_id: "child-conn",
+      running: true,
+    })
+
+    await act(async () => {
+      await h.actions!.disconnectIfIdle(TAB)
+    })
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+
+    emitAcpEvent(handlers, {
+      seq: 3,
+      connection_id: "spawned-conn",
+      type: "delegation_child_running",
+      child_connection_id: "child-conn",
+      running: false,
+    })
+    await act(async () => {
+      await h.actions!.disconnectIfIdle(TAB)
+    })
+    expect(h.acpDisconnect).toHaveBeenCalledWith("spawned-conn")
+  })
+
+  // A client that attaches mid-delegation (a reload, a second window) never
+  // sees the one-shot running frame; the snapshot is how it learns. This one
+  // has no card, so `activeDelegations` doesn't name it.
+  it("learns a running delegation from the snapshot", async () => {
+    const handlers = await connectOwner()
+    h.denormalizeSnapshot.mockReturnValue({
+      ...snapshotBase(),
+      eventSeq: 5,
+      delegatedChildren: ["child-conn"],
+    })
+    hydrateSnapshot(handlers, {
+      event_seq: 5,
+    } as unknown as LiveSessionSnapshot)
+
+    await act(async () => {
+      await h.actions!.disconnectIfIdle(TAB)
+    })
+
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+  })
+
   it("disconnects an IDLE owner right away (the reclaim this release exists for)", async () => {
     const handlers = await connectOwner()
     emitAcpEvent(handlers, {
@@ -737,6 +859,262 @@ describe("AcpConnectionsProvider preview-tab release (disconnectIfIdle)", () => 
     // and the idle sweep skips viewers, so leaving one would leak its stream.
     expect(h.acpDisconnect).not.toHaveBeenCalled()
     expect(h.store!.getConnection(TAB)).toBeUndefined()
+  })
+})
+
+// The provider unmounting under a live page (the whole workspace tree swapped
+// out — the i18n boot gate does it while a new locale's messages load) is no
+// more a request to stop work than a closed tab is: a busy owner is left to the
+// sweeps, an idle one is still reclaimed at once.
+//
+// Desktop firehose path only: that is where an owner is routed through the
+// reverse map the cleanup walks. The web attach path never routes one there,
+// so its provider unmount detaches streams and disconnects nothing.
+describe("AcpConnectionsProvider unmount teardown (desktop)", () => {
+  beforeEach(() => {
+    h.eventStreamValue = null
+    vi.mocked(subscribe).mockClear()
+  })
+
+  async function connectOwner() {
+    h.acpFindConnectionForConversation.mockResolvedValue(null)
+    const view = render(
+      <AcpConnectionsProvider>
+        <Probe />
+      </AcpConnectionsProvider>
+    )
+    await act(async () => {})
+    await act(async () => {
+      await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1", 42)
+    })
+    const onEvent = vi.mocked(subscribe).mock.calls[0]![1] as (
+      envelope: EventEnvelope
+    ) => void
+    const emit = (envelope: EventEnvelope) =>
+      act(() => {
+        onEvent(envelope)
+      })
+    emit({
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "connected",
+    })
+    expect(h.store!.getConnection(TAB)?.status).toBe("connected")
+    return { emit, unmount: view.unmount }
+  }
+
+  it("leaves a mid-turn owner running", async () => {
+    const { emit, unmount } = await connectOwner()
+    emit({
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+
+    unmount()
+
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+  })
+
+  it("leaves an owner with a running async task alive", async () => {
+    const { emit, unmount } = await connectOwner()
+    emit({
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "async_task",
+      delta: {
+        task_id: "bash_1",
+        spawned: true,
+        name: "tail the dev server log",
+        task_type: "shell",
+        can_stop: true,
+      },
+    })
+
+    unmount()
+
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+  })
+
+  it("still reclaims an idle owner", async () => {
+    const { unmount } = await connectOwner()
+
+    unmount()
+
+    expect(h.acpDisconnect).toHaveBeenCalledWith("spawned-conn")
+  })
+})
+
+// A view claims the active key while it is the one on screen, and has to give
+// the claim back once it is gone for good. A stale active key is touched by the
+// keepalive and skipped by the idle sweep, so the busy owner a closed view left
+// running would never be reclaimed, even after its work settled.
+describe("AcpConnectionsProvider active key across a view's lifetime", () => {
+  function Pane({
+    contextKey,
+    workingDir,
+  }: {
+    contextKey: string
+    workingDir?: string
+  }) {
+    useConnectionLifecycle({
+      contextKey,
+      agentType: "claude_code",
+      isActive: true,
+      workingDir,
+      sessionId: "sess-1",
+      conversationId: 42,
+    })
+    return null
+  }
+
+  function tree(
+    panes: { contextKey: string; workingDir?: string; mount?: string }[]
+  ) {
+    return (
+      <AcpConnectionsProvider>
+        <TaskProvider>
+          <Probe />
+          {panes.map(({ mount, ...pane }) => (
+            <Pane key={mount ?? pane.contextKey} {...pane} />
+          ))}
+        </TaskProvider>
+      </AcpConnectionsProvider>
+    )
+  }
+
+  it("reclaims the busy owner a closed view left running once its work settles", async () => {
+    vi.useFakeTimers()
+    try {
+      h.acpFindConnectionForConversation.mockResolvedValue(null)
+      const view = render(tree([{ contextKey: TAB, workingDir: "/tmp/x" }]))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(h.acpConnect).toHaveBeenCalledTimes(1)
+      const handlers = latestAttachHandlers()
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "connected",
+      })
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "async_task",
+        delta: {
+          task_id: "call_bg_1",
+          spawned: true,
+          name: "npm run dev",
+          task_type: "shell",
+          can_stop: true,
+        },
+      })
+      expect(h.store!.getActiveKey()).toBe(TAB)
+
+      // The tab closes while the terminal runs: the agent is kept, not killed.
+      view.rerender(tree([]))
+      expect(h.acpDisconnect).not.toHaveBeenCalled()
+
+      emitAcpEvent(handlers, {
+        seq: 3,
+        connection_id: "spawned-conn",
+        type: "async_task",
+        delta: { task_id: "call_bg_1", spawned: false, state: "completed" },
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          CONNECTION_IDLE_TIMEOUT_MS + IDLE_SWEEP_INTERVAL_MS + 1000
+        )
+      })
+      expect(h.acpDisconnect).toHaveBeenCalledWith("spawned-conn")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps a closed view's parent until its delegated sub-agent reports back", async () => {
+    vi.useFakeTimers()
+    try {
+      h.acpFindConnectionForConversation.mockResolvedValue(null)
+      const view = render(tree([{ contextKey: TAB, workingDir: "/tmp/x" }]))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      const handlers = latestAttachHandlers()
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "connected",
+      })
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "delegation_child_running",
+        child_connection_id: "child-conn",
+        running: true,
+      })
+
+      view.rerender(tree([]))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          CONNECTION_IDLE_TIMEOUT_MS + IDLE_SWEEP_INTERVAL_MS + 1000
+        )
+      })
+      expect(h.acpDisconnect).not.toHaveBeenCalled()
+
+      emitAcpEvent(handlers, {
+        seq: 3,
+        connection_id: "spawned-conn",
+        type: "delegation_child_running",
+        child_connection_id: "child-conn",
+        running: false,
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          CONNECTION_IDLE_TIMEOUT_MS + IDLE_SWEEP_INTERVAL_MS + 1000
+        )
+      })
+      expect(h.acpDisconnect).toHaveBeenCalledWith("spawned-conn")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("leaves a successor's claim alone when an earlier view goes away", async () => {
+    const SECOND = "conv-1-claude_code-43"
+    const view = render(tree([{ contextKey: TAB }]))
+    await act(async () => {})
+    expect(h.store!.getActiveKey()).toBe(TAB)
+
+    view.rerender(tree([{ contextKey: TAB }, { contextKey: SECOND }]))
+    await act(async () => {})
+    expect(h.store!.getActiveKey()).toBe(SECOND)
+
+    view.rerender(tree([{ contextKey: SECOND }]))
+    await act(async () => {})
+    expect(h.store!.getActiveKey()).toBe(SECOND)
+
+    view.rerender(tree([]))
+    await act(async () => {})
+    expect(h.store!.getActiveKey()).toBeNull()
+  })
+
+  // The desktop/mobile layout swap remounts every view in one commit without
+  // moving any, so it is not a transient unmount: the departing view releases,
+  // and the arriving view for the same key claims it again after that.
+  it("ends with the key claimed when a view is remounted in one commit", async () => {
+    const view = render(tree([{ contextKey: TAB, mount: "desktop" }]))
+    await act(async () => {})
+    expect(h.store!.getActiveKey()).toBe(TAB)
+
+    view.rerender(tree([{ contextKey: TAB, mount: "mobile" }]))
+    await act(async () => {})
+    expect(h.store!.getActiveKey()).toBe(TAB)
   })
 })
 
@@ -1652,6 +2030,7 @@ describe("AcpConnectionsProvider reconnect (status-icon button)", () => {
       lastError: null,
       eventSeq: 7,
       activeDelegations: [],
+      delegatedChildren: [],
     })
     h.acpFindConnectionForConversation.mockResolvedValue(null)
     await mountProvider()
@@ -1968,6 +2347,285 @@ describe("AcpConnectionsProvider permission request details", () => {
     })
   })
 
+  it("tells a sandbox network request by the live call it is about", async () => {
+    // claude-agent-acp 0.98.0, recorded: the call is announced first, with
+    // its tool name; the request after it names only the host.
+    await mountProvider()
+
+    await act(async () => {
+      await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+    })
+
+    const handlers = latestAttachHandlers()
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "tool_call",
+      tool_call_id: "net-1",
+      title: "SandboxNetworkAccess",
+      kind: "other",
+      status: "pending",
+      content: null,
+      raw_input: JSON.stringify({ host: "example.com" }),
+      raw_output: null,
+      meta: { claudeCode: { toolName: "SandboxNetworkAccess" } },
+    })
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "permission_request",
+      request_id: "req-net",
+      tool_call: {
+        toolCallId: "net-1",
+        title: "example.com",
+        rawInput: { host: "example.com" },
+        _meta: { permission: { version: 1, title: "example.com" } },
+      },
+      options: [],
+    })
+
+    const parsed = parsePermissionToolCall(
+      h.store!.getConnection(TAB)!.pendingPermission?.tool_call
+    )
+    expect(parsed.networkHost).toBe("example.com")
+    // The request's own block is kept.
+    expect(parsed.description).toBe("example.com")
+  })
+
+  it("tells a sandbox network request whose call arrives after it", async () => {
+    const originalRaf = globalThis.requestAnimationFrame
+    const originalCancelRaf = globalThis.cancelAnimationFrame
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0)
+      return 1
+    })
+    vi.stubGlobal("cancelAnimationFrame", () => {})
+
+    try {
+      await mountProvider()
+
+      await act(async () => {
+        await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+      })
+
+      const handlers = latestAttachHandlers()
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "permission_request",
+        request_id: "req-net",
+        tool_call: {
+          toolCallId: "net-1",
+          title: "example.com",
+          rawInput: { host: "example.com" },
+        },
+        options: [],
+      })
+      expect(
+        parsePermissionToolCall(
+          h.store!.getConnection(TAB)!.pendingPermission?.tool_call
+        ).networkHost
+      ).toBeNull()
+
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "tool_call",
+        tool_call_id: "net-1",
+        title: "SandboxNetworkAccess",
+        kind: "other",
+        status: "pending",
+        content: null,
+        raw_input: JSON.stringify({ host: "example.com" }),
+        raw_output: null,
+        meta: { claudeCode: { toolName: "SandboxNetworkAccess" } },
+      })
+
+      expect(
+        parsePermissionToolCall(
+          h.store!.getConnection(TAB)!.pendingPermission?.tool_call
+        ).networkHost
+      ).toBe("example.com")
+    } finally {
+      vi.stubGlobal("requestAnimationFrame", originalRaf)
+      vi.stubGlobal("cancelAnimationFrame", originalCancelRaf)
+    }
+  })
+
+  it("keeps the tool name of a call announced after its request drew it", async () => {
+    // Recorded in a browser against claude-agent-acp 0.98.0: in a turn, the
+    // request can reach the store first and draw a placeholder call; the
+    // announcement that follows is the only frame naming the tool.
+    const originalRaf = globalThis.requestAnimationFrame
+    const originalCancelRaf = globalThis.cancelAnimationFrame
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0)
+      return 1
+    })
+    vi.stubGlobal("cancelAnimationFrame", () => {})
+
+    try {
+      await mountProvider()
+
+      await act(async () => {
+        await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+      })
+
+      const handlers = latestAttachHandlers()
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "prompting",
+      })
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "permission_request",
+        request_id: "req-net",
+        tool_call: {
+          toolCallId: "net-2",
+          title: "example.org",
+          rawInput: { host: "example.org" },
+        },
+        options: [],
+      })
+      emitAcpEvent(handlers, {
+        seq: 3,
+        connection_id: "spawned-conn",
+        type: "tool_call",
+        tool_call_id: "net-2",
+        title: "SandboxNetworkAccess",
+        kind: "other",
+        status: "pending",
+        content: null,
+        raw_input: JSON.stringify({ host: "example.org" }),
+        raw_output: null,
+        meta: { claudeCode: { toolName: "SandboxNetworkAccess" } },
+      })
+
+      const conn = h.store!.getConnection(TAB)!
+      const block = conn.liveMessage?.content.find(
+        (b) => b.type === "tool_call" && b.info.tool_call_id === "net-2"
+      )
+      expect(block?.type === "tool_call" ? block.info.meta : null).toEqual({
+        claudeCode: { toolName: "SandboxNetworkAccess" },
+      })
+      expect(
+        parsePermissionToolCall(conn.pendingPermission?.tool_call).networkHost
+      ).toBe("example.org")
+    } finally {
+      vi.stubGlobal("requestAnimationFrame", originalRaf)
+      vi.stubGlobal("cancelAnimationFrame", originalCancelRaf)
+    }
+  })
+
+  it("keeps a Monitor a monitor through the frames that announce it", async () => {
+    // claude-agent-acp 0.98.0, recorded: the call is announced by its tool
+    // name with no input, and the input follows in an update that names no
+    // tool. That input's `command` alone would read as a shell command.
+    const originalRaf = globalThis.requestAnimationFrame
+    const originalCancelRaf = globalThis.cancelAnimationFrame
+    // Tool-call updates flush on the next frame; run frames by hand.
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      frames.push(cb)
+      return frames.length
+    })
+    vi.stubGlobal("cancelAnimationFrame", () => {})
+    const runFrames = () =>
+      act(() => {
+        while (frames.length > 0) frames.shift()!(0)
+      })
+
+    try {
+      await mountProvider()
+
+      await act(async () => {
+        await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+      })
+
+      const handlers = latestAttachHandlers()
+      const liveCall = () => {
+        const block = h
+          .store!.getConnection(TAB)!
+          .liveMessage?.content.find(
+            (b) => b.type === "tool_call" && b.info.tool_call_id === "toolu_m"
+          )
+        return block?.type === "tool_call" ? block.info : null
+      }
+      const liveName = () => {
+        const call = liveCall()
+        return call
+          ? inferLiveToolName({
+              title: call.title,
+              kind: call.kind,
+              rawInput: call.raw_input,
+              meta: call.meta,
+            })
+          : null
+      }
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "status_changed",
+        status: "prompting",
+      })
+      emitAcpEvent(handlers, {
+        seq: 2,
+        connection_id: "spawned-conn",
+        type: "tool_call",
+        tool_call_id: "toolu_m",
+        title: "Monitor",
+        kind: "other",
+        status: "pending",
+        content: null,
+        raw_input: null,
+        raw_output: null,
+        meta: { claudeCode: { toolName: "Monitor" } },
+      })
+      runFrames()
+      expect(liveName()).toBe("monitor")
+
+      emitAcpEvent(handlers, {
+        seq: 3,
+        connection_id: "spawned-conn",
+        type: "tool_call_update",
+        tool_call_id: "toolu_m",
+        title: null,
+        status: null,
+        content: null,
+        raw_input: JSON.stringify({
+          command: "for i in 1 2 3; do echo event-$i; sleep 2; done",
+          description: "probe monitor",
+        }),
+        raw_output: null,
+      })
+      runFrames()
+      expect(liveCall()?.raw_input).toContain("echo event-$i")
+      expect(liveName()).toBe("monitor")
+
+      emitAcpEvent(handlers, {
+        seq: 4,
+        connection_id: "spawned-conn",
+        type: "tool_call_update",
+        tool_call_id: "toolu_m",
+        title: null,
+        status: "completed",
+        content:
+          "Monitor started (task bttyx34fg, expires in 5m unless the source ends first; you get one notice at expiry — re-arm if you still need the watch). You will be notified on each event.",
+        raw_input: null,
+        raw_output: null,
+      })
+      runFrames()
+      expect(liveCall()?.status).toBe("completed")
+      expect(liveName()).toBe("monitor")
+    } finally {
+      vi.stubGlobal("requestAnimationFrame", originalRaf)
+      vi.stubGlobal("cancelAnimationFrame", originalCancelRaf)
+    }
+  })
+
   it("never lends a permission request another file's edit text", async () => {
     await mountProvider()
 
@@ -2236,6 +2894,7 @@ describe("AcpConnectionsProvider permission request details", () => {
       lastError: null,
       eventSeq: 5,
       activeDelegations: [],
+      delegatedChildren: [],
     })
     hydrateSnapshot(handlers, {
       connection_id: "spawned-conn",
@@ -3602,6 +4261,7 @@ describe("streaming flush window widens with the run it re-renders", () => {
         lastError: null,
         eventSeq: 9,
         activeDelegations: [],
+        delegatedChildren: [],
       })
       hydrateSnapshot(handlers, {
         event_seq: 9,
@@ -3657,6 +4317,7 @@ describe("streaming flush window widens with the run it re-renders", () => {
         lastError: null,
         eventSeq: 2,
         activeDelegations: [],
+        delegatedChildren: [],
       })
       hydrateSnapshot(handlers, {
         event_seq: 2,
@@ -5533,6 +6194,7 @@ describe("delegation-child attach: mid-turn hydration", () => {
       lastError: null,
       eventSeq: 7,
       activeDelegations: [],
+      delegatedChildren: [],
     })
   })
 
@@ -5605,6 +6267,7 @@ describe("delegation-child attach: mid-turn hydration", () => {
       lastError: null,
       eventSeq: 7,
       activeDelegations: active,
+      delegatedChildren: [],
     })
     await mountProvider()
 
@@ -5747,6 +6410,7 @@ describe("desktop: a sub-agent already parked when this window attaches", () => 
               status: "prompting",
               eventSeq: 5,
               activeDelegations: [ACTIVE],
+              delegatedChildren: [],
             }
           : {
               ...snapshotBase(),
@@ -6032,6 +6696,7 @@ describe("routing survives every surface watching one connection", () => {
       lastError: null,
       eventSeq: 0,
       activeDelegations: [],
+      delegatedChildren: [],
     })
   })
 
@@ -6532,6 +7197,7 @@ describe("connect() teardown races", () => {
       lastError: null,
       eventSeq: 0,
       activeDelegations: [],
+      delegatedChildren: [],
     })
     await act(async () => {
       await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1", 42)
@@ -7333,6 +7999,7 @@ describe("AcpConnectionsProvider mid-turn steering messages", () => {
       configStaleKind: null,
       backgroundOutstanding: 0,
       activeDelegations: [],
+      delegatedChildren: [],
       lastError: null,
       eventSeq: 9,
     })
@@ -8228,6 +8895,56 @@ describe("AcpConnectionsProvider remembers advertised commands", () => {
       "/tmp/x",
       []
     )
+  })
+
+  // claude-agent-acp 0.99.1 sends the list again once it has read Claude
+  // Code's skill list: the same commands, only their skill marks added.
+  it("takes a list that differs only in its skill marks", async () => {
+    const handlers = await connectOwner()
+    const SIMPLIFY = { name: "simplify", description: "Review the code" }
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "available_commands",
+      commands: [REVIEW, SIMPLIFY],
+    })
+    const read = [
+      { ...REVIEW, skill: true, skill_path: "/p/review/SKILL.md" },
+      { ...SIMPLIFY, skill: true },
+    ]
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "available_commands",
+      commands: read,
+    })
+    expect(h.store!.getConnection(TAB)!.availableCommands).toEqual(read)
+
+    // A path alone changing is a change too.
+    const moved = [
+      { ...REVIEW, skill: true, skill_path: "/q/review/SKILL.md" },
+      { ...SIMPLIFY, skill: true },
+    ]
+    emitAcpEvent(handlers, {
+      seq: 3,
+      connection_id: "spawned-conn",
+      type: "available_commands",
+      commands: moved,
+    })
+    expect(h.store!.getConnection(TAB)!.availableCommands).toEqual(moved)
+
+    // The same marks again, spelled with the absent keys explicit, are not.
+    const kept = h.store!.getConnection(TAB)!.availableCommands
+    emitAcpEvent(handlers, {
+      seq: 4,
+      connection_id: "spawned-conn",
+      type: "available_commands",
+      commands: [
+        { ...REVIEW, skill: true, skill_path: "/q/review/SKILL.md" },
+        { ...SIMPLIFY, skill: true, skill_path: null },
+      ],
+    })
+    expect(h.store!.getConnection(TAB)!.availableCommands).toBe(kept)
   })
 
   it("files the list a snapshot carries, which is the only copy after a refresh", async () => {

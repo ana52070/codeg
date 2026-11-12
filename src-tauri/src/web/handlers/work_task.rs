@@ -160,6 +160,15 @@ pub struct DeliverPrParams {
     /// half of a choice nobody made.
     #[serde(default)]
     pub delete_worktree: bool,
+    /// Finish the task with this delivery. Absent = `true`: a client that
+    /// predates the choice delivers the way every delivery always did.
+    #[serde(default)]
+    pub mark_done: Option<bool>,
+    /// Which issues the pull request closes — a task made from several
+    /// related issues only. Absent keeps the list already fixed for the task,
+    /// or closes every issue on its first delivery.
+    #[serde(default)]
+    pub closes: Option<Vec<i64>>,
 }
 
 #[derive(Deserialize)]
@@ -403,6 +412,8 @@ pub async fn work_task_deliver_pr(
         params.pr_title,
         params.draft,
         params.delete_worktree,
+        params.mark_done,
+        params.closes,
     )
     .await
     .map_err(AppCommandError::from)?;

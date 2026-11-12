@@ -24,7 +24,7 @@ const CHECK_USER_FEEDBACK_SUFFIX_RE = /[^a-z0-9]check_user_feedback$/
 
 /**
  * The codeg-mcp workbench companions, which own `CodegMcpToolCard` (and, for
- * `resume_delegation`, `ResumedDelegationCard`). Same bare-name-plus-suffix
+ * `resume_delegation`, `DelegationResumeRow`). Same bare-name-plus-suffix
  * treatment as the delegation tools above: the bare form is what the live path
  * produces post-`inferLiveToolName`, the suffix form is the raw
  * `mcp__<server>__<tool>` name the history parsers keep.
@@ -64,6 +64,10 @@ export function isAgentLikeToolName(toolName: string): boolean {
     // forms, since this runs pre-normalize.
     name === "question" ||
     name === "ask_user_question" ||
+    // Google Antigravity's native ask tool: the history parser keeps this raw
+    // name. Bare only, like the alias in `tool-call-normalization` — a
+    // host-prefixed `*ask_question` is a third-party MCP tool.
+    name === "ask_question" ||
     // Kimi Code's native AskUserQuestion (also Claude's SDK tool of the same
     // name). The history parsers keep this raw camel-case name; the live path
     // already collapses it to "question".

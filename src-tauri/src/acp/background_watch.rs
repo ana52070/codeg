@@ -72,13 +72,13 @@ use crate::acp::types::{AcpEvent, BackgroundSettledInfo, ConnectionStatus};
 use crate::models::agent::AgentType;
 use crate::models::message::MessageTurn;
 use crate::parsers::claude::{
-    capture_tag, capture_title_record, find_clear_rollover_successor, find_session_file_in,
-    group_into_turns, is_meta_message, queued_human_prompt, queued_task_notification,
-    slash_command_display, task_notification_is_interim, task_notification_result_regex,
-    task_notification_status_regex, task_notification_summary_regex,
-    task_notification_task_id_regex, task_notification_tool_use_id_regex,
-    unescape_task_notification_text, ClaudeRecordAccumulator, BACKGROUND_RESULT_MAX_CHARS,
-    CONTEXT_CONTINUATION_PREFIX,
+    capture_tag, capture_title_record, claude_uri_link, find_clear_rollover_successor,
+    find_session_file_in, group_into_turns, is_compact_command, is_meta_message,
+    queued_human_prompt, queued_task_notification, slash_command_display,
+    task_notification_is_interim, task_notification_result_regex, task_notification_status_regex,
+    task_notification_summary_regex, task_notification_task_id_regex,
+    task_notification_tool_use_id_regex, unescape_task_notification_text, ClaudeRecordAccumulator,
+    BACKGROUND_RESULT_MAX_CHARS, CONTEXT_CONTINUATION_PREFIX,
 };
 use crate::parsers::truncate_str;
 use crate::web::event_bridge::{emit_with_state, EventEmitter};
@@ -156,45 +156,154 @@ fn reconstructed_slash_command_fingerprint(text: &str) -> Option<String> {
 }
 
 /// The first text claude-agent-acp writes into the transcript's user record
-/// for a prompt, trimmed (`promptToClaude`, as of 0.81.1): each block in
-/// order — a text block as it is; a text resource or a resource link as the
-/// link [`claude_uri_link`] renders, with a resource's body moved to a
-/// `<context>` block at the END of the record; images and blob resources as
-/// no text at all.
-fn first_transcript_text(blocks: &[crate::acp::types::PromptInputBlock]) -> Option<String> {
+/// for a prompt, trimmed, once for each way an adapter generation writes it.
+///
+/// `promptToClaude` takes the blocks in order: a text block as it is; a text
+/// resource or a resource link as the link [`claude_uri_link`] renders, with a
+/// resource's body moved to a `<context>` block at the END of the record; an
+/// image as no text at all. A BLOB resource is where the generations part:
+///
+/// * up to 0.98.0 the adapter dropped it whole, so it wrote no text either;
+/// * from 0.99.0 (#1460) one whose MIME type the adapter can send
+///   ([`claude_forwards_blob_mime`]) is written as its link, followed by an
+///   image or document block (or, for a text type, its decoded body in a
+///   `<context>` block); a blob of any other type is still dropped.
+///
+/// A PDF pasted with nothing typed is the prompt they disagree on: the
+/// composer drops the embedded badge from the prose and appends the blob
+/// alone, so 0.99.0 opens the record with the `clipboard://` link and 0.98.0
+/// leaves it without initiating text. Both are returned, so the prompt is
+/// recognized whichever adapter the connection runs; a custom version or one
+/// found on PATH can be older than the pin.
+fn first_transcript_texts(blocks: &[crate::acp::types::PromptInputBlock]) -> Vec<String> {
+    let mut texts: Vec<String> = Vec::with_capacity(2);
+    for forwards_blobs in [true, false] {
+        if let Some(text) = first_transcript_text(blocks, forwards_blobs) {
+            if !texts.contains(&text) {
+                texts.push(text);
+            }
+        }
+    }
+    texts
+}
+
+/// How Claude Code records an MCP prompt that the first text block invokes
+/// the way claude-agent-acp's `/` menu names it, `/mcp:<server>:<prompt>
+/// <args>`; `None` for any other text. The ledger keeps it beside the text as
+/// sent, which the record does not contain, as `LedgerEntry::recorded_command`.
+///
+/// The adapter's `promptToClaude` rewrites that block, matched by
+/// `^\/mcp:([^:\s]+):(\S+)(?:\s+([\s\S]*))?$` (0.100.0, #1495; earlier
+/// releases took one line only and left a prompt spanning lines as typed,
+/// which the plain fingerprint matches), to `/<server>:<prompt> (MCP)
+/// <args>`, the name Claude Code lists the prompt under. Claude Code records
+/// the command by its own name, `mcp__<server>__<prompt>`, with the server
+/// name normalized as MCP tool names are (`normalizeNameForMCP`: each UTF-16
+/// unit outside `[A-Za-z0-9_-]` becomes `_`; its extra rule for a
+/// `claude.ai ` server cannot apply, since the name holds no whitespace) and
+/// the prompt name as it is. The arguments go into `<command-args>`, so
+/// `/mcp:probe:greet world` is recorded as `/mcp__probe__greet` with `world`,
+/// which `slash_command_display` reads back as `/mcp__probe__greet world`.
+fn claude_mcp_prompt_transcript_text(text: &str) -> Option<String> {
+    use crate::acp::js_text::is_js_whitespace;
+    let (server, rest) = text.strip_prefix("/mcp:")?.split_once(':')?;
+    if server.is_empty() || server.contains(is_js_whitespace) {
+        return None;
+    }
+    let prompt_end = rest.find(is_js_whitespace).unwrap_or(rest.len());
+    let (prompt, args) = rest.split_at(prompt_end);
+    if prompt.is_empty() {
+        return None;
+    }
+    let mut recorded = String::from("/mcp__");
+    for c in server.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            recorded.push(c);
+        } else {
+            recorded.extend(std::iter::repeat_n('_', c.len_utf16()));
+        }
+    }
+    recorded.push_str("__");
+    recorded.push_str(prompt);
+    let args = args.trim_matches(is_js_whitespace);
+    if !args.is_empty() {
+        recorded.push(' ');
+        recorded.push_str(args);
+    }
+    Some(recorded)
+}
+
+/// [`first_transcript_texts`] for one adapter generation: `forwards_blobs`
+/// picks 0.99.0's rule for blob resources, and `false` the earlier one. A
+/// resource is read in the wire form `connection::map_prompt_blocks` gives it:
+/// a text resource whenever `text` is set or neither field is (an empty text
+/// resource, which still writes its link), a blob resource for `blob` alone.
+fn first_transcript_text(
+    blocks: &[crate::acp::types::PromptInputBlock],
+    forwards_blobs: bool,
+) -> Option<String> {
     use crate::acp::types::PromptInputBlock;
     blocks.iter().find_map(|block| {
         let text = match block {
             PromptInputBlock::Text { text } => text.trim().to_string(),
             PromptInputBlock::Resource {
                 uri,
-                text: Some(_),
-                ..
+                mime_type,
+                text: None,
+                blob: Some(_),
+            } => {
+                if !(forwards_blobs && claude_forwards_blob_mime(mime_type.as_deref())) {
+                    return None;
+                }
+                claude_uri_link(uri)
             }
-            | PromptInputBlock::ResourceLink { uri, .. } => claude_uri_link(uri),
-            PromptInputBlock::Resource { .. } | PromptInputBlock::Image { .. } => {
-                return None
+            PromptInputBlock::Resource { uri, .. } | PromptInputBlock::ResourceLink { uri, .. } => {
+                claude_uri_link(uri)
             }
+            PromptInputBlock::Image { .. } => return None,
         };
         (!text.is_empty()).then_some(text)
     })
 }
 
-/// claude-agent-acp's `formatUriAsLink`: `[@name](uri)` for a `file://` or
-/// `zed://` uri, named after its last path segment, and the bare uri for
-/// anything else (a web page, a pasted file's `clipboard://` uri).
-fn claude_uri_link(uri: &str) -> String {
-    let named = |rest: &str| {
-        let name = rest.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(rest);
-        format!("[@{name}]({uri})")
+/// claude-agent-acp's `isSupportedBlobMimeType` (`src/blob-resources.ts`,
+/// 0.99.0): the blob types it forwards to Claude. The MIME type is compared
+/// without its parameters or case (`text/plain; charset=utf-8` is
+/// `text/plain`), and `image/jpg`, which some clients send, counts as
+/// `image/jpeg`. Images it can show (PNG, JPEG, GIF, WebP) become image
+/// blocks, a PDF a document block, and text types (`text/*`, the listed
+/// `application/*` ones, any `+json` or `+xml`) are decoded and sent like a
+/// text resource. A blob without a MIME type is never forwarded.
+fn claude_forwards_blob_mime(mime_type: Option<&str>) -> bool {
+    use crate::acp::js_text::is_js_whitespace;
+    let Some(base) = mime_type
+        .and_then(|mime| mime.split(';').next())
+        .map(|base| base.trim_matches(is_js_whitespace).to_ascii_lowercase())
+        .filter(|base| !base.is_empty())
+    else {
+        return false;
     };
-    if let Some(path) = uri.strip_prefix("file://") {
-        named(path)
-    } else if uri.starts_with("zed://") {
-        named(uri)
-    } else {
-        uri.to_string()
-    }
+    matches!(
+        base.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "application/pdf"
+            | "application/json"
+            | "application/xml"
+            | "application/javascript"
+            | "application/typescript"
+            | "application/x-yaml"
+            | "application/yaml"
+            | "application/toml"
+            | "application/x-sh"
+            | "application/sql"
+            | "application/graphql"
+    ) || base.starts_with("text/")
+        || base.ends_with("+json")
+        || base.ends_with("+xml")
 }
 
 /// Fingerprints of prompts codeg itself sent on this connection, so the
@@ -219,7 +328,16 @@ pub(crate) struct PromptLedger {
 }
 
 struct LedgerEntry {
-    fingerprint: String,
+    /// What the prompt's initiating text starts with, one per adapter
+    /// generation that writes it differently ([`first_transcript_texts`]).
+    /// Any of them matching consumes the entry, so each sent prompt is still
+    /// matched once.
+    fingerprints: Vec<String>,
+    /// The command Claude Code records for an MCP prompt the entry invokes
+    /// ([`claude_mcp_prompt_transcript_text`]). Claude Code writes it only as
+    /// a command record, so it is matched only against a reconstructed
+    /// command, exactly, and never by the verbatim prefix rule.
+    recorded_command: Option<String>,
     recorded_at: Instant,
 }
 
@@ -315,24 +433,40 @@ impl PromptLedger {
     /// there the adapter writes the attachment's link first. Leaving such a
     /// prompt unrecorded classified its own turn as out-of-turn, so the overlay
     /// rendered the prompt and its reply a second time, under the live copy.
+    ///
+    /// The adapter generations disagree on one shape, a prompt that opens with
+    /// a blob resource (see [`first_transcript_texts`]); its entry then holds
+    /// both readings and is consumed by whichever the transcript shows.
     pub(crate) fn record_prompt_blocks(&self, blocks: &[crate::acp::types::PromptInputBlock]) {
-        let Some(fingerprint) = first_transcript_text(blocks) else {
+        let fingerprints = first_transcript_texts(blocks);
+        if fingerprints.is_empty() {
             // Nothing the adapter writes as text (an image-only prompt): its
             // record carries no initiating text, so it cannot start a turn of
             // its own here either.
             tracing::debug!("[bg-watch] prompt without text — no fingerprint recorded");
             return;
-        };
+        }
         // `/clear` is a CLI-local command: the adapter forwards it like any
         // other prompt and Claude answers it by starting a new session on a
         // new transcript file. This is the only notice codeg gets.
-        if fingerprint == "/clear" || fingerprint.starts_with("/clear ") {
+        if fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint == "/clear" || fingerprint.starts_with("/clear "))
+        {
             *self.clear_sent_at.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((Instant::now(), std::time::SystemTime::now()));
         }
+        let recorded_command = blocks
+            .iter()
+            .find_map(|block| match block {
+                crate::acp::types::PromptInputBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .and_then(claude_mcp_prompt_transcript_text);
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.push_back(LedgerEntry {
-            fingerprint,
+            fingerprints,
+            recorded_command,
             recorded_at: Instant::now(),
         });
         while entries.len() > LEDGER_CAP {
@@ -361,15 +495,24 @@ impl PromptLedger {
         }
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.retain(|e| e.recorded_at.elapsed() < LEDGER_TTL);
-        if let Some(pos) = entries.iter().position(|e| match initiator {
-            TurnInitiatorText::Verbatim(_) => {
-                text == e.fingerprint || text.starts_with(e.fingerprint.as_str())
-            }
+        let matches = |fingerprint: &str| match initiator {
+            TurnInitiatorText::Verbatim(_) => text == fingerprint || text.starts_with(fingerprint),
             TurnInitiatorText::ReconstructedSlashCommand(_) => {
-                text == e.fingerprint
-                    || reconstructed_slash_command_fingerprint(&e.fingerprint).as_deref()
-                        == Some(text)
+                text == fingerprint
+                    || reconstructed_slash_command_fingerprint(fingerprint).as_deref() == Some(text)
             }
+        };
+        let matches_recorded_command = |command: &str| {
+            matches!(initiator, TurnInitiatorText::ReconstructedSlashCommand(_))
+                && reconstructed_slash_command_fingerprint(command).as_deref() == Some(text)
+        };
+        if let Some(pos) = entries.iter().position(|e| {
+            e.fingerprints
+                .iter()
+                .any(|fingerprint| matches(fingerprint))
+                || e.recorded_command
+                    .as_deref()
+                    .is_some_and(matches_recorded_command)
         }) {
             entries.remove(pos);
             return true;
@@ -714,6 +857,24 @@ pub(crate) struct WatchState {
     /// an unrelated initiator, and the safe failure is the pre-fix duplicate,
     /// never a hidden turn.
     foreground_submission_id: Option<String>,
+    /// The records of a compaction read in `Foreground` mode, held back until
+    /// the transcript says whose it is (see [`is_held_compaction_record`]).
+    ///
+    /// Claude Code writes a `/compact` in this order: the `compact_boundary`
+    /// record, the continuation summary, the `<local-command-caveat>`, and only
+    /// then the command's own echo. Which turn the compaction belongs to is
+    /// known only at the echo: a `/compact` codeg sent matches the ledger, and
+    /// the wire renders it. One the ledger does not hold is out-of-turn — the
+    /// one claude-agent-acp 0.101.0 sends itself when a large session has sat
+    /// idle for 54 minutes (#1522), with no prompt open — and opens an episode.
+    /// That episode is handed these records first, so the overlay draws the
+    /// divider and its summary exactly as the history parse will, instead of
+    /// the echo alone (which the parser drops when no divider precedes it) —
+    /// unless codeg is prompting when the echo is read: a prompt sent while
+    /// the compaction ran takes its remaining frames into the wire's turn. Any
+    /// other record ends the hold: an `assistant` record is the turn going on
+    /// after the CLI compacted it automatically, which the wire renders.
+    held_compaction: Vec<serde_json::Value>,
     /// `Prompting` state for the tick currently being processed. Set once at
     /// `tick()` entry from the caller-supplied snapshot so `account()` (called
     /// per transcript line within the same tick) can read it without an extra
@@ -788,6 +949,7 @@ impl WatchState {
             was_prompting: false,
             foreground_awaiting_reply: false,
             foreground_submission_id: None,
+            held_compaction: Vec::new(),
             currently_prompting: false,
             turn_origin_task_ids: HashMap::new(),
             last_disk_activity: None,
@@ -1072,6 +1234,7 @@ impl WatchState {
             self.committed = meta.len();
             self.carry.clear();
             self.episode = None;
+            self.held_compaction.clear();
             self.mode = Mode::Foreground;
         } else if !unchanged {
             match self.read_new_lines(&path) {
@@ -1183,6 +1346,8 @@ impl WatchState {
             self.seed_titles_from_history(&f, self.committed);
         }
         self.read_failed = false;
+        // Records held from another file belong to none of this one's turns.
+        self.held_compaction.clear();
         self.file = Some(f);
     }
 
@@ -1555,6 +1720,17 @@ impl WatchState {
             self.foreground_awaiting_reply = false;
         }
 
+        // A compaction read while the wire owns the transcript waits for its
+        // `/compact` echo to say whose it is (see `held_compaction`); any other
+        // record ends the wait, and the records go wherever this one does.
+        if matches!(self.mode, Mode::Foreground)
+            && is_held_compaction_record(value, !self.held_compaction.is_empty())
+        {
+            self.held_compaction.push(value.clone());
+            return;
+        }
+        let held_compaction = std::mem::take(&mut self.held_compaction);
+
         // A message folded into the running turn continues that turn and never
         // starts one. Matched against the ledger — a prompt codeg sent that
         // Claude Code folded into a turn it started on its own, or a steer — it
@@ -1618,17 +1794,37 @@ impl WatchState {
                 .episode
                 .as_ref()
                 .is_some_and(|e| e.acc.messages.len() >= MAX_EPISODE_MESSAGES);
-            if matches!(self.mode, Mode::Foreground) || self.episode.is_none() || rotate {
+            let from_foreground = matches!(self.mode, Mode::Foreground);
+            if from_foreground || self.episode.is_none() || rotate {
                 if rotate {
                     self.collect_changed_turns(cwd, changed_turns);
                 }
                 // Any stable, strictly-increasing base works — turn ids only
                 // need to be unique and stable within the watch.
+                let mut acc = ClaudeRecordAccumulator::new(
+                    self.file.clone().unwrap_or_else(|| PathBuf::from("")),
+                );
+                // A `/compact` nobody sent through codeg was written after its
+                // own boundary and summary: the episode reads them first, so
+                // the divider (and the echo the parser places at it) is drawn
+                // as the history parse draws it. Only the echo claims them —
+                // another initiator after a held compaction (none is known to
+                // occur) leaves them to the wire, as before. So does a prompt
+                // codeg sent while the compaction ran: its turn takes the
+                // compaction's remaining frames, and the composer draws the
+                // card there.
+                if from_foreground
+                    && !self.currently_prompting
+                    && matches!(&initiator, TurnInitiatorText::ReconstructedSlashCommand(display)
+                        if is_compact_command(display))
+                {
+                    for record in held_compaction {
+                        acc.feed_value(record);
+                    }
+                }
                 self.episode = Some(Episode {
                     start_offset: self.next_episode_base(),
-                    acc: ClaudeRecordAccumulator::new(
-                        self.file.clone().unwrap_or_else(|| PathBuf::from("")),
-                    ),
+                    acc,
                     emitted_hashes: HashMap::new(),
                     origin_task_id: task_notification_origin_id(initiator_text),
                 });
@@ -1805,6 +2001,38 @@ fn turn_initiator_text(value: &serde_json::Value) -> Option<TurnInitiatorText> {
         return None;
     }
     Some(TurnInitiatorText::Verbatim(text))
+}
+
+/// Whether `value` is one of the records a compaction writes ahead of its
+/// `/compact` echo (see `WatchState::held_compaction`). A `compact_boundary`
+/// record starts the run. While one is `holding`, the continuation summary,
+/// the `<local-command-caveat>` the CLI writes before a local command's echo,
+/// and every record that is neither `user` nor `assistant` (attachments, the
+/// CLI's bookkeeping) join it. Anything else — an `assistant` record, the echo,
+/// a prompt — ends it.
+fn is_held_compaction_record(value: &serde_json::Value, holding: bool) -> bool {
+    let record_type = value.get("type").and_then(|t| t.as_str());
+    if record_type == Some("system")
+        && value.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary")
+    {
+        return true;
+    }
+    if !holding {
+        return false;
+    }
+    match record_type {
+        Some("assistant") => false,
+        Some("user") => {
+            if value.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true) {
+                return true;
+            }
+            let text = user_record_text(value).unwrap_or_default();
+            let text = text.trim_start();
+            text.starts_with(CONTEXT_CONTINUATION_PREFIX)
+                || (is_meta_message(value) && text.starts_with("<local-command-caveat>"))
+        }
+        _ => true,
+    }
 }
 
 /// The text of a message the user sent mid-turn, which Claude Code folded into
@@ -2712,6 +2940,86 @@ mod tests {
         assert!(matches!(ws.mode, Mode::Foreground));
     }
 
+    /// An `advisor` server-tool call and its `advisor_tool_result` are separate
+    /// assistant records (Claude Code 2.1.310), so a tick can read the call
+    /// before the result is flushed. The next tick re-emits the call's turn
+    /// with the result beside it, and leaves no turn holding only the result.
+    #[test]
+    fn an_advisor_result_read_a_tick_after_its_call_joins_the_call() {
+        use crate::models::message::ContentBlock;
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+        let assistant_block = |uuid: &str, block: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-07-07T03:49:05.000Z","uuid":"{uuid}","message":{{"id":"msg_adv","role":"assistant","model":"claude-sonnet-5","content":[{block}]}}}}"#
+            )
+        };
+        let advice = "ADVICE: check the edge cases first.";
+
+        write_lines(
+            &path,
+            &[
+                &cron_prompt("review the plan"),
+                &assistant_block(
+                    "a-call",
+                    r#"{"type":"server_tool_use","id":"srvtoolu_adv","name":"advisor","input":{}}"#,
+                ),
+            ],
+        );
+        let (turns, ..) =
+            unpack(tick_now(&mut ws, &ledger).expect("the out-of-turn turn surfaces"));
+        let blob = serde_json::to_string(&turns).unwrap();
+        assert!(
+            blob.contains("srvtoolu_adv") && !blob.contains(advice),
+            "{blob}"
+        );
+
+        write_lines(
+            &path,
+            &[
+                &assistant_block(
+                    "a-result",
+                    &format!(
+                        r#"{{"type":"advisor_tool_result","tool_use_id":"srvtoolu_adv","content":{{"type":"advisor_result","text":"{advice}","stop_reason":"end_turn"}}}}"#
+                    ),
+                ),
+                &assistant_text("a-after", "advisor consulted"),
+            ],
+        );
+        let (turns, ..) = unpack(tick_now(&mut ws, &ledger).expect("the result tick re-emits"));
+        let call_turn = turns
+            .iter()
+            .find(|turn| {
+                turn.blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { tool_use_id: Some(id), .. } if id == "srvtoolu_adv")
+                })
+            })
+            .expect("the call's turn is re-emitted");
+        assert!(
+            call_turn.blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolResult {
+                    tool_use_id: Some(id),
+                    output_preview: Some(text),
+                    is_error: false,
+                    ..
+                } if id == "srvtoolu_adv" && text == advice
+            )),
+            "{:?}",
+            call_turn.blocks
+        );
+        assert!(
+            turns.iter().all(|turn| !turn
+                .blocks
+                .iter()
+                .all(|b| matches!(b, ContentBlock::ToolResult { .. }))),
+            "{turns:?}"
+        );
+    }
+
     /// A folded message carries no `promptId`, so matching one leaves no
     /// submission to group by. An initiator that lands before the reply — a
     /// cron prompt here, which carries no id either — is out-of-turn as usual,
@@ -2906,6 +3214,336 @@ mod tests {
             "the wire renders this turn — a rebuilt separator must not turn it \
              into an overlay copy"
         );
+    }
+
+    /// The records Claude Code 2.1.318 writes for one `/compact`, in file
+    /// order, as a live transcript has them (claude-agent-acp 0.101.0): the
+    /// boundary, the continuation summary, the caveat, the command's echo and
+    /// its output. The echo's timestamp precedes the boundary's, but it is
+    /// written after it.
+    fn compact_records(tag: &str, prompt_id: &str) -> Vec<String> {
+        vec![
+            format!(
+                r#"{{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","isMeta":false,"timestamp":"2026-11-05T23:39:59.760Z","uuid":"b-{tag}","level":"info","compactMetadata":{{"trigger":"manual","preTokens":251005,"durationMs":18,"postTokens":2644,"cumulativeDroppedTokens":248361}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","promptId":"{prompt_id}","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"timestamp":"2026-11-05T23:39:59.761Z","uuid":"s-{tag}","message":{{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nPROBE SUMMARY: the user said hello.\n\nContinue the conversation from where it left off without asking the user any further questions."}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","promptId":"{prompt_id}","isMeta":true,"timestamp":"2026-11-05T23:39:59.740Z","uuid":"c-{tag}","message":{{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","promptId":"{prompt_id}","timestamp":"2026-11-05T23:39:59.740Z","uuid":"e-{tag}","message":{{"role":"user","content":"<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","promptId":"{prompt_id}","repeatsCompactSummary":true,"timestamp":"2026-11-05T23:39:59.872Z","uuid":"o-{tag}","message":{{"role":"user","content":"<local-command-stdout>Compacted PostCompact [callback] completed successfully</local-command-stdout>"}}}}"#
+            ),
+        ]
+    }
+
+    /// What a turn shows, without the ids and times that name its position.
+    fn shown(turns: &[MessageTurn]) -> Vec<serde_json::Value> {
+        turns
+            .iter()
+            .map(|t| serde_json::json!({ "role": t.role, "blocks": t.blocks }))
+            .collect()
+    }
+
+    /// claude-agent-acp 0.101.0 (#1522) sends `/compact` itself when a large
+    /// session has sat idle for 54 minutes: no prompt is open and codeg's
+    /// ledger holds nothing. The wire carries the compaction's frames outside
+    /// any turn, which the composer does not draw, so the overlay is the only
+    /// live view of it, and it must draw what reopening the conversation will:
+    /// the divider with its summary and the echo the parser places above it —
+    /// not the echo alone, which is all an episode opened at the echo saw.
+    #[test]
+    fn a_compact_nobody_sent_through_codeg_surfaces_with_its_divider() {
+        use crate::models::message::{ContentBlock, TurnRole};
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        ledger.record_text("hello idle");
+        write_lines(
+            &path,
+            &[
+                &user_prompt_array("u1", "hello idle"),
+                &assistant_text("a1", "ok"),
+            ],
+        );
+        assert!(tick_now(&mut ws, &ledger).is_none());
+
+        let records = compact_records("idle", "p-idle");
+        let lines: Vec<&str> = records.iter().map(String::as_str).collect();
+        write_lines(&path, &lines);
+        let (turns, ..) = unpack(tick_now(&mut ws, &ledger).expect("the idle compaction surfaces"));
+
+        let mut history = ClaudeRecordAccumulator::new(path.clone());
+        for line in &lines {
+            history.feed_line(line);
+        }
+        let history = group_into_turns(history.messages);
+        assert_eq!(
+            shown(&turns),
+            shown(&history),
+            "the overlay draws what history does"
+        );
+        assert_eq!(turns.len(), 2, "{turns:#?}");
+        assert!(matches!(turns[0].role, TurnRole::User));
+        assert!(matches!(
+            turns[0].blocks.as_slice(),
+            [ContentBlock::Text { text }] if text == "/compact"
+        ));
+        let divider = serde_json::to_string(&turns[1].blocks).unwrap();
+        assert!(divider.contains("\"preTokens\":251005"), "{divider}");
+        assert!(
+            divider.contains("PROBE SUMMARY: the user said hello."),
+            "{divider}"
+        );
+    }
+
+    /// The same records split across two reads: the hold outlives the tick.
+    #[test]
+    fn a_held_compaction_waits_across_ticks_for_its_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        let records = compact_records("split", "p-split");
+        let lines: Vec<&str> = records.iter().map(String::as_str).collect();
+        write_lines(&path, &lines[..3]);
+        assert!(tick_now(&mut ws, &ledger).is_none(), "nothing is known yet");
+        write_lines(&path, &lines[3..]);
+        let (turns, ..) = unpack(tick_now(&mut ws, &ledger).expect("surfaces at the echo"));
+        assert_eq!(turns.len(), 2, "{turns:#?}");
+        assert!(serde_json::to_string(&turns[1].blocks)
+            .unwrap()
+            .contains("\"preTokens\":251005"));
+    }
+
+    /// A `/compact` codeg sent stays on the wire, whichever tick reads its
+    /// records — the ledger claims the echo, and the held records go with it.
+    #[test]
+    fn a_compact_codeg_sent_never_reaches_the_overlay() {
+        for split in [5, 3] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = temp_session(&dir);
+            write_lines(&path, &[]);
+            let ledger = PromptLedger::shared();
+            let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+            ledger.record_text("/compact");
+            let records = compact_records("sent", "p-sent");
+            let lines: Vec<&str> = records.iter().map(String::as_str).collect();
+            write_lines(&path, &lines[..split]);
+            let first = tick_prompting(&mut ws, &ledger);
+            write_lines(&path, &lines[split..]);
+            let second = tick_now(&mut ws, &ledger);
+            for event in [first, second].into_iter().flatten() {
+                assert!(
+                    unpack(event).0.is_empty(),
+                    "split at {split}: the wire renders a /compact codeg sent"
+                );
+            }
+        }
+    }
+
+    /// The CLI compacts a long turn by itself: the boundary and the summary land
+    /// mid-turn and the reply goes on. That compaction is the wire's.
+    #[test]
+    fn an_automatic_compaction_inside_a_codeg_turn_stays_on_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        ledger.record_text("refactor the parser");
+        let records = compact_records("auto", "p-auto");
+        write_lines(
+            &path,
+            &[
+                &user_prompt_array("u1", "refactor the parser"),
+                &assistant_text("a1", "Reading the files."),
+                &records[0].replace("\"manual\"", "\"auto\""),
+                &records[1],
+                &assistant_text("a2", "Continuing after the compaction."),
+            ],
+        );
+        let event = tick_prompting(&mut ws, &ledger);
+        assert!(event.is_none() || unpack(event.unwrap()).0.is_empty());
+        assert!(ws.held_compaction.is_empty(), "the reply ended the hold");
+    }
+
+    /// A prompt sent while the adapter's own compaction runs takes the
+    /// compaction's remaining frames into its turn, which the composer draws:
+    /// the overlay stays out of it rather than drawing the divider again.
+    #[test]
+    fn a_compact_read_while_codeg_prompts_is_left_to_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        ledger.record_text("back again");
+        let records = compact_records("race", "p-race");
+        let mut lines: Vec<&str> = records.iter().map(String::as_str).collect();
+        let prompt = user_prompt_array("u2", "back again");
+        let reply = assistant_text("a2", "Picking up from the summary.");
+        lines.extend([prompt.as_str(), reply.as_str()]);
+        write_lines(&path, &lines);
+        let event = tick_prompting(&mut ws, &ledger);
+        assert!(
+            event.is_none() || unpack(event.unwrap()).0.is_empty(),
+            "the turn on the wire draws this compaction"
+        );
+    }
+
+    /// Only a `/compact` echo claims a held compaction: another initiator after
+    /// one opens its episode without it, as before.
+    #[test]
+    fn a_held_compaction_is_not_handed_to_another_initiator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+
+        let records = compact_records("other", "p-other");
+        write_lines(
+            &path,
+            &[
+                &records[0],
+                &records[1],
+                &cron_prompt("keep going"),
+                &assistant_text("a2", "resuming"),
+            ],
+        );
+        let (turns, ..) = unpack(tick_now(&mut ws, &ledger).expect("the cron turn surfaces"));
+        assert!(
+            !serde_json::to_string(&turns).unwrap().contains("preTokens"),
+            "{turns:#?}"
+        );
+    }
+
+    /// An MCP prompt sent the way the `/` menu offers it, `/mcp:<server>:<prompt>`,
+    /// is recorded under Claude Code's own name for the command. The records are
+    /// the ones claude-agent-acp 0.100.0 and Claude Code 2.1.316 wrote for a
+    /// probe server `probe` with a prompt `greet`, the second one for arguments
+    /// that span lines, which 0.100.0 (#1495) rewrites too.
+    #[test]
+    fn an_mcp_prompt_matches_the_ledger_under_claude_codes_command_name() {
+        for (sent, recorded_args) in [
+            ("/mcp:probe:greet world", "world"),
+            ("/mcp:probe:greet line1\nline2", "line1\\nline2"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = temp_session(&dir);
+            let ledger = PromptLedger::shared();
+            ledger.record_text(sent);
+
+            let mut ws = WatchState::new();
+            ws.session_id = Some("s1".into());
+            ws.epoch = Some(epoch("2020-01-01T00:00:00Z"));
+            ws.adopt_file(path.clone());
+
+            let command = format!(
+                r#"{{"type":"user","timestamp":"2026-07-07T03:50:00.000Z","uuid":"u-cmd","promptId":"p1","message":{{"role":"user","content":"<command-message>mcp__probe__greet</command-message>\n<command-name>/mcp__probe__greet</command-name>\n<command-args>{recorded_args}</command-args>"}}}}"#
+            );
+            let expansion = r#"{"type":"user","timestamp":"2026-07-07T03:50:00.100Z","uuid":"u-exp","parentUuid":"u-cmd","promptId":"p1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"PROMPT_GREET for world"}]}}"#;
+            write_lines(
+                &path,
+                &[&command, expansion, &assistant_text("a1", "Hello.")],
+            );
+            let event = tick_prompting(&mut ws, &ledger);
+            assert!(
+                event.is_none() || unpack(event.unwrap()).0.is_empty(),
+                "{sent:?}: the wire renders this turn — the command record under \
+                 Claude Code's name must not surface an overlay copy"
+            );
+        }
+    }
+
+    /// The adapter's pattern decides what is an MCP prompt invocation, and the
+    /// CLI's normalization what its record is named.
+    #[test]
+    fn claude_mcp_prompt_transcript_text_mirrors_the_adapter_and_the_cli() {
+        let read = claude_mcp_prompt_transcript_text;
+        assert_eq!(
+            read("/mcp:probe:greet world").as_deref(),
+            Some("/mcp__probe__greet world")
+        );
+        assert_eq!(
+            read("/mcp:probe:greet").as_deref(),
+            Some("/mcp__probe__greet")
+        );
+        assert_eq!(
+            read("/mcp:probe:greet \t ").as_deref(),
+            Some("/mcp__probe__greet")
+        );
+        assert_eq!(
+            read("/mcp:probe:greet  two  words \n").as_deref(),
+            Some("/mcp__probe__greet two  words")
+        );
+        assert_eq!(
+            read("/mcp:probe:greet line1\nline2").as_deref(),
+            Some("/mcp__probe__greet line1\nline2")
+        );
+        // The server name is normalized per UTF-16 unit, the prompt name kept,
+        // colons and all, up to the first whitespace.
+        assert_eq!(
+            read("/mcp:my.server-1:do.it x").as_deref(),
+            Some("/mcp__my_server-1__do.it x")
+        );
+        assert_eq!(read("/mcp:caf\u{e9}:p").as_deref(), Some("/mcp__caf___p"));
+        assert_eq!(read("/mcp:\u{1F600}:p").as_deref(), Some("/mcp______p"));
+        assert_eq!(read("/mcp:srv:a:b c").as_deref(), Some("/mcp__srv__a:b c"));
+        // What the adapter leaves as it is.
+        for text in [
+            " /mcp:probe:greet x",
+            "/mcp:probe",
+            "/mcp::greet",
+            "/mcp:probe:",
+            "/mcp:probe: x",
+            "/mcp:pro be:greet",
+            "/probe:greet (MCP) x",
+            "/mcp__probe__greet x",
+        ] {
+            assert_eq!(read(text), None, "{text:?}");
+        }
+    }
+
+    /// Claude Code writes an MCP prompt's own name only in a command record,
+    /// so that form consumes the entry only as a rebuilt command, exactly: a
+    /// literal prompt that merely starts with it stays a turn of its own.
+    #[test]
+    fn an_mcp_prompts_recorded_command_matches_only_a_command_record() {
+        let ledger = PromptLedger::shared();
+        ledger.record_text("/mcp:probe:greet world");
+        for initiator in [
+            TurnInitiatorText::Verbatim("/mcp__probe__greet worldly".into()),
+            TurnInitiatorText::Verbatim("/mcp__probe__greet world".into()),
+            TurnInitiatorText::ReconstructedSlashCommand("/mcp__probe__greet worldly".into()),
+        ] {
+            assert!(!ledger.consume_matching(&initiator), "{initiator:?}");
+        }
+        let command =
+            TurnInitiatorText::ReconstructedSlashCommand("/mcp__probe__greet world".into());
+        assert!(ledger.consume_matching(&command));
+        assert!(!ledger.consume_matching(&command), "consumed once");
+
+        // The text as sent still matches as before: 0.99.1 leaves a prompt
+        // whose arguments span lines as typed.
+        let ledger = PromptLedger::shared();
+        ledger.record_text("/mcp:probe:greet line1\nline2");
+        assert!(ledger.consume_matching(&TurnInitiatorText::Verbatim(
+            "/mcp:probe:greet line1\nline2".into()
+        )));
     }
 
     #[test]
@@ -4259,7 +4897,7 @@ mod tests {
         assert!(ledger.consume_matching(&initiator("what is this\nhttps://example.com/")));
 
         // Nothing the adapter writes as text leaves nothing to record: an
-        // image, and a blob resource it drops.
+        // image, and a blob resource no adapter forwards.
         ledger.record_prompt_blocks(&[
             PromptInputBlock::Image {
                 data: "iVBORw0KGgo=".into(),
@@ -4267,13 +4905,190 @@ mod tests {
                 uri: None,
             },
             PromptInputBlock::Resource {
-                uri: "clipboard://report.pdf-1".into(),
-                mime_type: Some("application/pdf".into()),
+                uri: "clipboard://bundle.zip-1".into(),
+                mime_type: Some("application/zip".into()),
                 text: None,
-                blob: Some("JVBERi0=".into()),
+                blob: Some("UEsFBg==".into()),
             },
         ]);
         assert!(ledger.entries.lock().unwrap().is_empty());
+
+        // A resource with neither field still travels as a text resource (an
+        // empty one, see `map_prompt_blocks`), which writes its link.
+        ledger.record_prompt_blocks(&[PromptInputBlock::Resource {
+            uri: "clipboard://empty.txt-1".into(),
+            mime_type: None,
+            text: None,
+            blob: None,
+        }]);
+        assert!(ledger.consume_matching(&initiator(
+            "clipboard://empty.txt-1\n\n<context ref=\"clipboard://empty.txt-1\">\n\n</context>"
+        )));
+    }
+
+    /// A PDF pasted into the composer, as codeg sends it: the embedded badge is
+    /// dropped from the prose and the bytes ride as a blob resource after it.
+    fn pdf_blob(uri: &str) -> crate::acp::types::PromptInputBlock {
+        crate::acp::types::PromptInputBlock::Resource {
+            uri: uri.to_string(),
+            mime_type: Some("application/pdf".into()),
+            text: None,
+            blob: Some("JVBERi0xLjQK".into()),
+        }
+    }
+
+    /// The record Claude Code 2.1.312 writes for a PDF sent with nothing typed
+    /// through claude-agent-acp 0.99.0, from a real transcript: the link where
+    /// the badge was, then the document block. 0.98.0 dropped the blob and
+    /// wrote no user record at all.
+    fn pdf_prompt_record(uri: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"2026-10-29T02:10:00.000Z","uuid":"u-pdf","promptId":"p-pdf","message":{{"role":"user","content":[{{"type":"text","text":"{uri}"}},{{"type":"document","source":{{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}}}]}}}}"#
+        )
+    }
+
+    /// claude-agent-acp 0.99.0 (#1460) writes a forwarded blob's link into the
+    /// record, so a PDF sent with nothing typed now opens its record with that
+    /// link. Unrecorded, the turn read as out-of-turn and the overlay drew the
+    /// prompt and the reply a second time.
+    #[test]
+    fn a_pdf_sent_with_nothing_typed_stays_a_foreground_turn() {
+        let uri = "clipboard://report.pdf-1";
+        let records = [
+            pdf_prompt_record(uri),
+            assistant_text("a-pdf", "It is a one-page PDF."),
+        ];
+        let refs: Vec<&str> = records.iter().map(String::as_str).collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_session(&dir);
+        write_lines(&path, &[]);
+        let ledger = PromptLedger::shared();
+        let mut ws = WatchState::with_file_for_test("s1", path.clone());
+        ledger.record_prompt_blocks(&[pdf_blob(uri)]);
+        write_lines(&path, &refs);
+        assert!(
+            tick_now(&mut ws, &ledger).is_none(),
+            "the prompt codeg sent must not come back as an overlay turn"
+        );
+
+        // The same records with nothing recorded are what the watcher treats
+        // as out-of-turn, which is what the fingerprint prevents.
+        let other = tempfile::tempdir().unwrap();
+        let other_path = temp_session(&other);
+        write_lines(&other_path, &[]);
+        let empty = PromptLedger::shared();
+        let mut unrecorded = WatchState::with_file_for_test("s2", other_path.clone());
+        write_lines(&other_path, &refs);
+        let (turns, ..) = unpack(tick_now(&mut unrecorded, &empty).expect("surfaces"));
+        assert!(!turns.is_empty());
+    }
+
+    /// A prompt that opens with a blob is read both ways, so it is matched
+    /// whichever adapter generation wrote the record, and only once.
+    #[test]
+    fn a_prompt_opening_with_a_blob_matches_either_adapter_generation() {
+        use crate::acp::types::PromptInputBlock;
+        let initiator = |text: &str| TurnInitiatorText::Verbatim(text.to_string());
+        let uri = "clipboard://report.pdf-1";
+        let blob_first = || {
+            vec![
+                pdf_blob(uri),
+                PromptInputBlock::Text {
+                    text: "what is in the attachment?".into(),
+                },
+            ]
+        };
+
+        // 0.99.0: the link, then the typed text (real record, joined).
+        let ledger = PromptLedger::shared();
+        ledger.record_prompt_blocks(&blob_first());
+        assert!(ledger.consume_matching(&initiator(
+            "clipboard://report.pdf-1\nwhat is in the attachment?"
+        )));
+        // One prompt, one match: the other reading went with the entry.
+        assert!(!ledger.consume_matching(&initiator("what is in the attachment?")));
+
+        // 0.98.0 dropped the blob, so its record opens with the typed text.
+        let ledger = PromptLedger::shared();
+        ledger.record_prompt_blocks(&blob_first());
+        assert!(ledger.consume_matching(&initiator("what is in the attachment?")));
+        assert!(ledger.entries.lock().unwrap().is_empty());
+
+        // A blob 0.99.0 still drops does not open the record; the forwarded one
+        // after it does.
+        let ledger = PromptLedger::shared();
+        let mut mixed = vec![PromptInputBlock::Resource {
+            uri: "clipboard://bundle.zip-1".into(),
+            mime_type: Some("application/zip".into()),
+            text: None,
+            blob: Some("UEsFBg==".into()),
+        }];
+        mixed.extend(blob_first());
+        ledger.record_prompt_blocks(&mixed);
+        assert!(ledger.consume_matching(&initiator(
+            "clipboard://report.pdf-1\nwhat is in the attachment?"
+        )));
+
+        // Typed text first reads the same on both, and is recorded once.
+        let ledger = PromptLedger::shared();
+        ledger.record_prompt_blocks(&[
+            PromptInputBlock::Text {
+                text: "summarize it".into(),
+            },
+            pdf_blob(uri),
+        ]);
+        assert_eq!(
+            ledger.entries.lock().unwrap()[0].fingerprints,
+            vec!["summarize it".to_string()]
+        );
+    }
+
+    /// `isSupportedBlobMimeType` in claude-agent-acp 0.99.0's
+    /// `src/blob-resources.ts`.
+    #[test]
+    fn forwarded_blob_types_follow_claude_agent_acp() {
+        for mime in [
+            "application/pdf",
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/gif",
+            "image/webp",
+            "IMAGE/PNG",
+            "text/plain",
+            "text/csv; charset=iso-8859-1",
+            " text/markdown ",
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/typescript",
+            "application/x-yaml",
+            "application/yaml",
+            "application/toml",
+            "application/x-sh",
+            "application/sql",
+            "application/graphql",
+            "application/ld+json",
+            "image/svg+xml",
+            "\u{FEFF}application/pdf",
+        ] {
+            assert!(claude_forwards_blob_mime(Some(mime)), "{mime}");
+        }
+        for mime in [
+            "application/zip",
+            "application/octet-stream",
+            "image/bmp",
+            "image/heic",
+            "audio/mpeg",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "",
+            "  ",
+            "; charset=utf-8",
+        ] {
+            assert!(!claude_forwards_blob_mime(Some(mime)), "{mime}");
+        }
+        assert!(!claude_forwards_blob_mime(None));
     }
 
     #[test]

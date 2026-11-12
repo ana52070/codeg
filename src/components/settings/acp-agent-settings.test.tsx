@@ -11,6 +11,7 @@ import {
   buildAcpAdapterCheck,
   buildVersionCheck,
   canCheckLatestRelease,
+  claudeThinkingSummariesEnabled,
   compareReleaseVersion,
   configTextForClaudeSave,
   extractCodexImportantValues,
@@ -21,6 +22,7 @@ import {
   importantEnvKeysByAgent,
   importantFieldsFor,
   inferGrokMode,
+  isOpenCodeV1Release,
   latestReleaseOffer,
   materializeClaudeHardeningFlags,
   patchCodexConfigTomlText,
@@ -30,6 +32,7 @@ import {
   codexSandboxSeedsAcpPreset,
   rebaseDeepSeekDraft,
   setClaudeEnvFlagInConfigText,
+  setClaudeThinkingSummaries,
   setHostToolsAgentMode,
   showsCodexReadOnlyAcpWarning,
   toggleGrokReasoningEffort,
@@ -63,7 +66,6 @@ function makeAgent(overrides: Partial<AcpAgentInfo>): AcpAgentInfo {
     env: {},
     config_json: null,
     config_file_path: null,
-    opencode_auth_json: null,
     codex_auth_json: null,
     cline_secrets_json: null,
     codex_config_toml: null,
@@ -917,6 +919,64 @@ describe("buildVersionCheck", () => {
     expect(check?.status).toBe("warn")
     expect(check?.message).toContain("Upgrade available")
     expect(check?.fixes.some((fix) => fix.kind === "upgrade_npx")).toBe(true)
+  })
+
+  // codeg refuses OpenCode 1.x at launch, so an installed 1.x is a failure
+  // that names the upgrade, not an optional "upgrade available".
+  it("fails an installed OpenCode 1.x and offers the upgrade", () => {
+    const check = buildVersionCheck(
+      makeAgent({
+        agent_type: "open_code" as AgentType,
+        registry_id: "opencode",
+        distribution_type: "binary",
+        registry_version: "2.2.0",
+        installed_version: "1.19.3",
+      })
+    )
+    expect(check?.status).toBe("fail")
+    expect(check?.message).toContain("OpenCode 1.x is no longer supported")
+    expect(check?.fixes.map((fix) => fix.kind)).toEqual([
+      "upgrade_binary",
+      "uninstall_binary",
+    ])
+  })
+
+  it("keeps the usual comparison for OpenCode 2 and preview builds", () => {
+    const behind = buildVersionCheck(
+      makeAgent({
+        agent_type: "open_code" as AgentType,
+        registry_id: "opencode",
+        distribution_type: "binary",
+        registry_version: "2.2.0",
+        installed_version: "2.1.4",
+      })
+    )
+    expect(behind?.status).toBe("warn")
+    expect(behind?.message).toContain("Upgrade available")
+
+    const current = buildVersionCheck(
+      makeAgent({
+        agent_type: "open_code" as AgentType,
+        registry_id: "opencode",
+        distribution_type: "binary",
+        registry_version: "2.2.0",
+        installed_version: "2.2.0",
+      })
+    )
+    expect(current?.status).toBe("pass")
+  })
+
+  it("judges only OpenCode releases as 1.x", () => {
+    expect(isOpenCodeV1Release("1.19.3")).toBe(true)
+    expect(isOpenCodeV1Release(" 1.18.33 ")).toBe(true)
+    expect(isOpenCodeV1Release("0.15.31")).toBe(true)
+    expect(isOpenCodeV1Release("1.19.5-beta.1")).toBe(true)
+    expect(isOpenCodeV1Release("2.0.0")).toBe(false)
+    expect(isOpenCodeV1Release("2.2.0")).toBe(false)
+    // Preview channels publish as 0.0.0-<tag> whatever the build's age.
+    expect(isOpenCodeV1Release("0.0.0-dev-202609282300")).toBe(false)
+    expect(isOpenCodeV1Release("1.19")).toBe(false)
+    expect(isOpenCodeV1Release("local")).toBe(false)
   })
 
   // uv runtime not ready: a uvx agent (Hermes) must surface a blocked
@@ -2418,6 +2478,39 @@ describe("codex WebSocket switch follows supports_websockets alone", () => {
   })
 })
 
+describe("Claude thinking summaries — CLAUDE_CODE_THINKING_DISPLAY in the adapter's env", () => {
+  const KEY = "CLAUDE_CODE_THINKING_DISPLAY"
+
+  it("is on only for the exact value claude-agent-acp reads", () => {
+    expect(claudeThinkingSummariesEnabled("")).toBe(false)
+    expect(claudeThinkingSummariesEnabled("ANTHROPIC_MODEL=opus")).toBe(false)
+    // The adapter takes `summarized` or `omitted` verbatim and ignores
+    // anything else, which leaves Claude Code's own default in place.
+    expect(claudeThinkingSummariesEnabled(`${KEY}=omitted`)).toBe(false)
+    expect(claudeThinkingSummariesEnabled(`${KEY}=Summarized`)).toBe(false)
+    // Trimmed, as the saved env is.
+    expect(claudeThinkingSummariesEnabled(`${KEY} = summarized `)).toBe(true)
+  })
+
+  it("round-trips on and off, keeping the other variables", () => {
+    const on = setClaudeThinkingSummaries("ANTHROPIC_MODEL=opus", true)
+    expect(on).toBe(`ANTHROPIC_MODEL=opus\n${KEY}=summarized`)
+    expect(claudeThinkingSummariesEnabled(on)).toBe(true)
+
+    // Off removes the key, so Claude Code's default display applies again:
+    // `omitted` would hide the notes it writes between tool calls as well.
+    const off = setClaudeThinkingSummaries(on, false)
+    expect(off).toBe("ANTHROPIC_MODEL=opus")
+    expect(claudeThinkingSummariesEnabled(off)).toBe(false)
+  })
+
+  it("replaces a value typed by hand when turned on", () => {
+    expect(setClaudeThinkingSummaries(`${KEY}=omitted\nX=1`, true)).toBe(
+      `${KEY}=summarized\nX=1`
+    )
+  })
+})
+
 describe("host-tools toggle — hand the fs/terminal channels back to the agent", () => {
   const KEY = "CODEG_ACP_HOST_TOOLS"
 
@@ -2731,8 +2824,9 @@ describe("TRAE CLI env keys", () => {
 
 describe("Command Code env keys", () => {
   // Command Code's sign-in for a browser-less machine is the API key it reads
-  // ahead of its stored login; it talks only to its own service and the model
-  // is chosen over ACP, so there is no endpoint or model variable.
+  // ahead of its stored login; providers of the user's own (BYOK) are
+  // connected inside Command Code (`/connect`) and the model is chosen over
+  // ACP, so there is no endpoint or model variable.
   it("offers only the API key, under the name Command Code reads", () => {
     expect(importantEnvKeysByAgent("command_code" as AgentType)).toEqual({
       apiBaseUrl: [],
@@ -2810,5 +2904,23 @@ describe("ZCode runtime configuration", () => {
       buildAcpAdapterCheck({ ...adapter, native_path: "C:/ZCode/zcode.cjs" })
         ?.status
     ).toBe("pass")
+  })
+})
+
+describe("MiniMax Code native configuration", () => {
+  it("does not offer generic API fields or write keys to codeg settings", () => {
+    expect(importantEnvKeysByAgent("minimax_code")).toEqual({
+      apiBaseUrl: [],
+      apiKey: [],
+      model: [],
+    })
+    expect(importantFieldsFor("minimax_code")).toEqual({
+      apiBaseUrl: false,
+      apiKey: false,
+      model: false,
+    })
+    expect(
+      patchEnvByImportantKey("minimax_code", "KEEP=value", "apiKey", "secret")
+    ).toBe("KEEP=value")
   })
 })

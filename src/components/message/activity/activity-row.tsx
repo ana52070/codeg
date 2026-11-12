@@ -4,11 +4,14 @@ import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { ChevronRightIcon } from "lucide-react"
 
 import type { ToolApproval } from "@/lib/activity/approval"
+import { rowIdentity } from "@/lib/activity/build-activity"
 import type { StepStatus } from "@/lib/activity/types"
 import { cn } from "@/lib/utils"
 import { useActivityRender } from "./activity-context"
+import { useActivityLive } from "./activity-live-context"
 import { ApprovalChip, showsApproval } from "./approval-chip"
-import { useEndMarkLine } from "./use-end-mark-line"
+import { useFoldRow } from "./fold-back"
+import { TimelineFoot } from "./timeline-foot"
 import { useRailGrowth } from "./use-rail-growth"
 
 const MARKER_POSITION = {
@@ -55,6 +58,8 @@ export function ActivityRow({
   title,
   className,
   headerClassName,
+  motionKey,
+  motionSelf = false,
 }: {
   stepKey: string
   status?: StepStatus
@@ -85,6 +90,13 @@ export function ActivityRow({
   title?: string
   className?: string
   headerClassName?: string
+  /** What the row stands for as the reply changes shape (`ReplyMotion`):
+   *  its step, unless the row is something else that shares that step's key —
+   *  a group, keyed by its first member. */
+  motionKey?: string
+  /** The row fades in by itself (late): the reply's motion leaves its
+   *  arrival alone. */
+  motionSelf?: boolean
 }) {
   const detailId = useId()
   const open = expandable && expanded
@@ -132,7 +144,7 @@ export function ActivityRow({
 
   const header = (
     <>
-      <span className="flex min-w-0 flex-1 items-start gap-1">
+      <span className="flex min-w-0 items-start gap-1">
         <span className="min-w-0">{children}</span>
         {expandable ? <RowChevron open={open} /> : null}
       </span>
@@ -153,6 +165,10 @@ export function ActivityRow({
     variant === "main" ? "text-sm leading-6" : "text-[0.8125rem] leading-6",
     headerClassName
   )
+  // The header on its own, for the reply's motion: a new group fades its
+  // header in while the command it took in glides out from under it.
+  const ownMotionKey = motionKey ?? rowIdentity(stepKey)
+  const headerMotionKey = `${ownMotionKey}:head`
 
   return (
     <li
@@ -163,13 +179,15 @@ export function ActivityRow({
       data-marker={markerKind}
       data-status={status}
       data-step-key={stepKey}
+      data-motion-key={ownMotionKey}
+      data-motion-self={motionSelf ? "" : undefined}
       // As the last row it runs the rail beside its open panel, down to the
       // end mark (globals.css).
       data-body={panel ? "" : undefined}
     >
       <span
         className={cn(
-          "absolute flex items-center justify-center",
+          "activity-marker absolute flex items-center justify-center",
           MARKER_POSITION[variant][markerKind]
         )}
       >
@@ -180,17 +198,24 @@ export function ActivityRow({
           type="button"
           className={cn(
             headerClass,
-            "cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            // Pointed at or focused, its words darken as the foot's do
+            // (`.activity-row-toggle` in globals.css).
+            "activity-row-toggle cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           )}
           aria-expanded={open}
           aria-controls={open ? detailId : undefined}
           title={title}
           onClick={() => onExpandedChange?.(!open)}
+          data-motion-key={headerMotionKey}
         >
           {header}
         </button>
       ) : (
-        <div className={headerClass} title={title}>
+        <div
+          className={headerClass}
+          title={title}
+          data-motion-key={headerMotionKey}
+        >
           {header}
         </div>
       )}
@@ -244,35 +269,88 @@ export function RowChevron({
 }
 
 /**
- * An open group's members, on their own dashed rail. `end` says whether the
- * group is done (`reached`: the members end on their mark, level with the
- * last member's last line) or still going; a folded group's live member
- * under its header has neither. While the reply is written, the rail grows
- * down to each member that joins — a group whose members are all done can
- * still gain one, and only turns live again in the commit that adds it.
+ * Where a group stands in its reply. `current`: the reply is still being
+ * written with the group its last row, where the next step may join it.
+ * `going`: its foot turns — while it is current and the agent is not waiting
+ * on the user — from the group's first command to its last rather than
+ * flickering between commands. Folded while current, its running member shows
+ * under its header, so the step under way is never hidden.
+ *
+ * Once the reply has moved past it — a row follows, or the answer does — or
+ * is done, nothing joins it: a member still running there (a command moved to
+ * the background, a call going on beside the steps after it) says so on its
+ * own row, inside the group, and the foot is the row that folds the group.
+ */
+export function useGroupPlace(followed: boolean): {
+  current: boolean
+  going: boolean
+} {
+  const { isStreaming } = useActivityRender()
+  const { awaitingUser } = useActivityLive()
+  const current = isStreaming && !followed
+  return { current, going: current && !awaitingUser }
+}
+
+/** The foot an open group's members end on (see `TimelineFoot`). */
+export interface MembersFoot {
+  /** The group is still going: a member runs, or more may join it. */
+  working: boolean
+  /** The members' own marker, which sets how far down the foot sits. */
+  after: "ring" | "dot"
+  /** What the group holds, said after "Collapse": `3 commands`. */
+  what: string
+  /** Folds the group. */
+  onFold: () => void
+  /** The group's key: its foot's, as the reply changes shape (`ReplyMotion`). */
+  motionScope: string
+}
+
+/**
+ * An open group's members, on their own dashed rail, ending on a foot
+ * (`foot`): the turning ring while the group is still going, then a row that
+ * folds it; a folded group's live member under its header has none. Folded
+ * from its foot, the group's header comes back into view and takes the focus
+ * the foot had. While the reply is written, the rail grows down to each
+ * member that joins.
  */
 export function ActivityMembers({
-  end,
+  foot,
   children,
 }: {
-  end?: "pending" | "reached"
+  foot?: MembersFoot
   children: ReactNode
 }) {
   const { isStreaming } = useActivityRender()
   const listRef = useRef<HTMLUListElement>(null)
-  useEndMarkLine(listRef, end === "reached")
-  useRailGrowth(listRef, end !== undefined && isStreaming)
+  const foldRow = useFoldRow()
+  useRailGrowth(listRef, foot !== undefined && isStreaming)
   return (
-    <ul ref={listRef} role="list" className="activity-children" data-end={end}>
+    <ul ref={listRef} role="list" className="activity-children">
       {children}
+      {foot ? (
+        <TimelineFoot
+          variant="child"
+          after={foot.after}
+          working={foot.working}
+          what={foot.what}
+          onFold={(control) => foldRow(control, foot.onFold)}
+          motionScope={foot.motionScope}
+        />
+      ) : null}
     </ul>
   )
 }
 
-/** A row header's end column: its figure, status word, time. */
+/**
+ * A row header's end column: its figure, status word, time. It takes the
+ * line's room past the label, a faint dashed line running across it up to
+ * the figure (`.activity-figure` in globals.css), so a figure at the far end
+ * of a wide row still reads as the label's. The label beside it must not
+ * grow.
+ */
 export function RowFigure({ children }: { children: ReactNode }) {
   return (
-    <span className="activity-mono ms-auto flex shrink-0 items-center gap-3 ps-3 text-xs leading-6 text-muted-foreground">
+    <span className="activity-mono activity-figure flex shrink-0 grow items-center justify-end gap-3 ps-3 text-xs leading-6 text-activity-secondary">
       {children}
     </span>
   )

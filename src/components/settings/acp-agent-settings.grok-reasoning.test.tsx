@@ -68,7 +68,6 @@ function grokAgent(settings: Partial<GrokSettings> = {}): AcpAgentInfo {
     env: { GROK_AUTH_MODE: "custom" },
     config_json: null,
     config_file_path: null,
-    opencode_auth_json: null,
     codex_auth_json: null,
     cline_secrets_json: null,
     codex_config_toml: null,

@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils"
 import { ReadImagePreview } from "../../read-image-preview"
 import { SearchResultsOutput } from "../../search-results-output"
 import { useActivityRender } from "../activity-context"
-import { ActivityMembers, ActivityRow } from "../activity-row"
+import { ActivityMembers, ActivityRow, useGroupPlace } from "../activity-row"
 import { DetailBox } from "../detail-box"
 import { useDisclosure } from "../disclosure-store"
 import { FileHeader } from "../file-header"
@@ -97,18 +97,23 @@ function useExploreSummary(steps: ToolStep[]): string {
 
 /**
  * "Explored · 3 files, 1 search": a run of reads and searches. Folded unless a
- * member failed without being redone. While the run is live and folded, the
- * member that is running shows under the header, so the current step is never
- * hidden.
+ * member failed without being redone. Open, its members end on a foot that
+ * turns while more may join the run, then folds it. Folded while the run is
+ * the reply's last row, the member that is running shows under the header,
+ * so the current step is never hidden; once the reply has moved past, a
+ * member still running stays inside.
  */
 export const ExploreGroupRow = memo(function ExploreGroupRow({
   groupKey,
   steps,
   status: given,
+  followed = false,
 }: {
   groupKey: string
   steps: ToolStep[]
   status: StepStatus
+  /** Something follows the group in the reply: a row, or the answer. */
+  followed?: boolean
 }) {
   const t = useTranslations("Folder.chat.activity")
   const statusText = useStatusText()
@@ -126,13 +131,15 @@ export const ExploreGroupRow = memo(function ExploreGroupRow({
   })
   const status = awaited ? "awaiting" : given
   const live = status === "running" || status === "pending"
+  const { current, going } = useGroupPlace(followed)
   const liveStep = open
     ? null
-    : (awaited ?? (live ? lastLiveTool(steps) : null))
+    : (awaited ?? (current && live ? lastLiveTool(steps) : null))
 
   return (
     <ActivityRow
       stepKey={groupKey}
+      motionKey={`group:${groupKey}`}
       status={status}
       marker={
         <RailIcon
@@ -164,7 +171,15 @@ export const ExploreGroupRow = memo(function ExploreGroupRow({
         ) : null
       }
       detail={() => (
-        <ActivityMembers end={live || awaited ? "pending" : "reached"}>
+        <ActivityMembers
+          foot={{
+            working: going,
+            after: "dot",
+            motionScope: groupKey,
+            what: summary,
+            onFold: () => setOpen(false),
+          }}
+        >
           {steps.map((step) => (
             <ExploreChildRow key={step.key} step={step} />
           ))}
@@ -175,12 +190,12 @@ export const ExploreGroupRow = memo(function ExploreGroupRow({
         <span
           className={cn(
             "shrink-0 font-medium",
-            live ? "activity-shimmer" : "text-muted-foreground"
+            live ? "activity-shimmer" : "text-activity-secondary"
           )}
         >
           {live || awaited ? t("row.exploring") : t("row.explored")}
         </span>
-        <span className="min-w-0 truncate text-muted-foreground">
+        <span className="min-w-0 truncate text-activity-secondary">
           {summary}
         </span>
       </span>
@@ -198,16 +213,6 @@ function lastLiveTool(steps: ToolStep[]): ToolStep | null {
   return null
 }
 
-const VERB_KEY = {
-  read: "verb.read",
-  search: "verb.search",
-  glob: "verb.glob",
-  list: "verb.list",
-  fetch: "verb.fetch",
-  "web-search": "verb.webSearch",
-  memory: "verb.memory",
-} as const
-
 const STEP_VERB_KEY = {
   read: "stepVerb.read",
   search: "stepVerb.search",
@@ -219,10 +224,9 @@ const STEP_VERB_KEY = {
 } as const
 
 /**
- * One read or search. Inside an explore group it is a child row —
- * `read  agent/src/q.py  212 lines`, with the verb as a short monospace
- * column; on its own it is a full row with its own ring: `Read
- * agent/src/q.py  212 lines`.
+ * One read or search: `Read agent/src/q.py  212 lines`. Inside an explore
+ * group it is a child row on a dot; on its own it is a full row with its own
+ * ring.
  */
 export const ExploreChildRow = memo(function ExploreChildRow({
   step: given,
@@ -236,7 +240,7 @@ export const ExploreChildRow = memo(function ExploreChildRow({
   const { recoveredKeys } = useActivityRender()
   const step = useLiveToolStep(given)
   const { tool, part } = step
-  const known = tool.kind in VERB_KEY
+  const known = tool.kind in STEP_VERB_KEY
   const path = useDisplayPath(tool.target?.path)
   const hasDetail = exploreHasDetail(tool, part.output ?? null, part.errorText)
   const failed = tool.status === "failed" || tool.status === "rejected"
@@ -278,34 +282,22 @@ export const ExploreChildRow = memo(function ExploreChildRow({
       trailing={<ToolFigure tool={tool} />}
       detail={() => <ExploreDetail step={step} />}
     >
-      <span
-        className={cn(
-          "flex min-w-0 items-baseline",
-          standalone ? "gap-2" : "gap-3"
-        )}
-      >
+      {/* Laid out as a command row is, in a group or not: the verb in words,
+          then the target right after it. */}
+      <span className="flex min-w-0 items-baseline gap-2">
         {known ? (
-          standalone ? (
-            <span className="shrink-0 font-medium text-muted-foreground">
-              {t(STEP_VERB_KEY[tool.kind as keyof typeof STEP_VERB_KEY])}
-            </span>
-          ) : (
-            <span className="activity-mono w-14 shrink-0 text-muted-foreground">
-              {t(VERB_KEY[tool.kind as keyof typeof VERB_KEY])}
-            </span>
-          )
+          <span className="shrink-0 font-medium text-activity-secondary">
+            {t(STEP_VERB_KEY[tool.kind as keyof typeof STEP_VERB_KEY])}
+          </span>
         ) : null}
         <span
-          className={cn(
-            "min-w-0 truncate font-mono text-muted-foreground",
-            standalone && "text-[0.8125rem]"
-          )}
+          className="min-w-0 truncate font-mono text-[0.8125rem] text-activity-secondary"
           dir="ltr"
         >
           {targetText}
         </span>
         {tool.detail ? (
-          <span className="min-w-0 shrink truncate font-sans text-muted-foreground">
+          <span className="min-w-0 shrink truncate font-sans text-activity-secondary">
             {tool.detail}
           </span>
         ) : null}

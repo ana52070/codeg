@@ -31,7 +31,7 @@
 
 <table>
   <tr>
-    <td width="50%" valign="top">🧩 <strong>One interface for every agent</strong><br/>Nineteen agents built in, and any ACP agent can join — all rendered as the same structured conversation, not a terminal.</td>
+    <td width="50%" valign="top">🧩 <strong>One interface for every agent</strong><br/>Twenty agents built in, and any ACP agent can join — all rendered as the same structured conversation, not a terminal.</td>
     <td width="50%" valign="top">🔎 <strong>Sessions that travel</strong><br/>Import, search, and resume the history every agent keeps on disk, then hand it to a different agent.</td>
   </tr>
   <tr>
@@ -39,59 +39,6 @@
     <td width="50%" valign="top">🌍 <strong>Wherever you work</strong><br/>Desktop app, self-hosted server or Docker, iPhone, iPad, and Android — and Telegram, Lark, or WeChat.</td>
   </tr>
 </table>
-
-## 💖 Sponsors
-
-<table>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg" target="_blank"><img src="./docs/images/compshare.png" alt="Compshare" width="160" /></a><br/>
-      <strong><a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">Compshare (UCloud)</a></strong>
-    </td>
-    <td>Thanks to Compshare for sponsoring this project! Compshare is UCloud's AI cloud platform, offering cost-effective monthly and pay-as-you-go agent Plan subscriptions for Chinese models, starting at just ¥49/month. It also provides stable officially-proxied access to overseas models. Supports Claude Code, Codex, and API integrations. Enterprise-ready with high concurrency, 24/7 technical support, and self-service invoicing. Users who sign up via <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">this link</a> receive ¥5 in free platform credits!</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://hezu.ink/sign-up?aff=0wVz" target="_blank"><img src="./docs/images/hezu-ink.jpg" alt="合租巴士" width="200" /></a><br/>
-      <strong><a href="https://hezu.ink/sign-up?aff=0wVz">合租巴士</a></strong>
-    </td>
-    <td>Thanks to 合租巴士 for sponsoring this project! 合租巴士 is a reliable and efficient AI relay platform, offering highly stable relay for mainstream models such as Codex and Claude Code. Top-ups are credited at a transparent 1:1 ratio, with Codex rate subsidies as low as 0.08. <a href="https://hezu.ink/sign-up?aff=0wVz">Join the group via the official website to get $5 in trial credit</a>.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://go.apimart.ai/gh-codeg" target="_blank"><img src="./docs/images/apimart-ai.png" alt="APIMart" width="200" /></a><br/>
-      <strong><a href="https://go.apimart.ai/gh-codeg">APIMart</a></strong>
-    </td>
-    <td>Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image & video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-codeg">sign up here</a> to get started.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg" target="_blank"><img src="./docs/images/astraflow.png" alt="UCloud ·星图AstraFlow" width="120" /></a><br/>
-      <strong><a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg">UCloud ·星图AstraFlow</a></strong>
-    </td>
-    <td>
-      <a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg">UCloud ·星图AstraFlow</a><br/>
-      UCloud's AstraFlow large-model platform gives you one-click access to 200+ models: leading open-source models such as Kimi K3, DeepSeek V4/V3, Qwen 3, GLM5.2, and happyhorse are built in — no training of your own required, ready to use out of the box.<br/>
-      Sign up with your <strong>email</strong> through the link above, complete real-name verification, and <a href="https://f.howxm.com/xs/u/HVFW5X8EIYV1">claim ¥50 in compute credits</a>.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG" target="_blank"><img src="./docs/images/sidrune-ai.png" alt="Sidrune AI" width="200" /></a><br/>
-      <strong><a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG">Sidrune AI</a></strong>
-    </td>
-    <td>Thanks to Sidrune AI for sponsoring this project! Sidrune AI gives you access to GPT, Claude, and other major AI models through a single API. New users who sign up through <a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG">our dedicated link</a> with promo code <code>SDRCODEG</code> get $3 in API credits.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA" target="_blank"><img src="./docs/images/beeapi.jpg" alt="BeeAPI" width="200" /></a><br/>
-      <strong><a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA">BeeAPI</a></strong>
-    </td>
-    <td>Thanks to <a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA">BeeAPI</a> for sponsoring this project! BeeAPI is a professional multi-model AI API relay and aggregation platform that brings together many providers and a wide range of mainstream AI models. It supports cross-vendor price comparison, smart routing across groups, and unified API access and billing, helping you call AI services more flexibly, reliably, and at a lower cost.</td>
-  </tr>
-</table>
-
-> Want to become a Codeg sponsor? [Reach out to us by email.](mailto:itpkcn@gmail.com)
 
 ## ✨ Features
 
@@ -101,7 +48,7 @@
 
 ### One Interface for Every Agent
 
-Nineteen agents, plus any ACP agent, in one rich chat with tool cards, live diffs, and interactive replies.
+Twenty agents, plus any ACP agent, in one rich chat with tool cards, live diffs, and interactive replies.
 
 [Docs →](https://docs.codeg.app/guide/supported-agents) · [Custom agents →](https://docs.codeg.app/guide/custom-agents) · [UI Render →](https://docs.codeg.app/guide/skills#cards-tables-and-charts-in-replies)
 
@@ -273,7 +220,7 @@ git diff | codeg-cli -a codex \
 
 ## 🤖 Supported Agents
 
-Codeg talks to every agent over the [Agent Client Protocol](https://agentclientprotocol.com), so each one gets the same structured interface. Nineteen come built in, and Codeg installs, pins, and updates most of them for you:
+Codeg talks to every agent over the [Agent Client Protocol](https://agentclientprotocol.com), so each one gets the same structured interface. Twenty come built in, and Codeg installs, pins, and updates most of them for you:
 
 <p>
   <a href="https://www.anthropic.com/claude-code"><kbd><img src="./docs/images/agents/claude-code.svg" alt="" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
@@ -285,6 +232,7 @@ Codeg talks to every agent over the [Agent Client Protocol](https://agentclientp
   <a href="https://hermes-agent.nousresearch.com"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="./docs/images/agents/hermes-agent-dark.svg" /><img src="./docs/images/agents/hermes-agent.svg" alt="" width="16" valign="middle" /></picture> Hermes Agent</kbd></a> &nbsp;
   <a href="https://www.codebuddy.ai"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="./docs/images/agents/codebuddy-dark.svg" /><img src="./docs/images/agents/codebuddy.svg" alt="" width="16" valign="middle" /></picture> CodeBuddy</kbd></a> &nbsp;
   <a href="https://www.kimi.com/code"><kbd><img src="./docs/images/agents/kimi-code.svg" alt="" width="16" valign="middle" /> Kimi Code</kbd></a> &nbsp;
+  <a href="./docs/agents/minimax-code.md"><kbd><img src="./docs/images/agents/minimax-code.svg" alt="" width="16" valign="middle" /> MiniMax Code</kbd></a> &nbsp;
   <a href="https://pi.dev"><kbd><img src="./docs/images/agents/pi.svg" alt="" width="16" valign="middle" /> Pi</kbd></a> &nbsp;
   <a href="https://x.ai/cli"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="./docs/images/agents/grok-dark.svg" /><img src="./docs/images/agents/grok.svg" alt="" width="16" valign="middle" /></picture> Grok</kbd></a> &nbsp;
   <a href="https://cursor.com/cli"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="./docs/images/agents/cursor-dark.svg" /><img src="./docs/images/agents/cursor.svg" alt="" width="16" valign="middle" /></picture> Cursor</kbd></a> &nbsp;

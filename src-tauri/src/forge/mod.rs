@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod auto;
+pub mod cnb;
 pub mod deliver;
 pub mod envelope;
 pub mod gitea;
@@ -33,6 +34,12 @@ pub enum ForgeProvider {
     /// this variant makes. Nothing downstream distinguishes them, and inventing
     /// a fourth variant would only split one credential store in two.
     Gitea,
+    /// CNB (cnb.cool) — Tencent's code hosting platform. Its API is its own:
+    /// the REST base is a SEPARATE host (`api.cnb.cool`), authentication is a
+    /// `Bearer` token, and the wire shapes are neither GitHub's nor Gitea's.
+    /// It does borrow GitHub's `refs/pull/<n>/head` namespace, which is what
+    /// lets a proposed change's head be fetched without adding a remote.
+    Cnb,
 }
 
 impl ForgeProvider {
@@ -41,6 +48,7 @@ impl ForgeProvider {
             ForgeProvider::GitHub => "github",
             ForgeProvider::GitLab => "gitlab",
             ForgeProvider::Gitea => "gitea",
+            ForgeProvider::Cnb => "cnb",
         }
     }
 
@@ -52,6 +60,7 @@ impl ForgeProvider {
             "github" => Ok(ForgeProvider::GitHub),
             "gitlab" => Ok(ForgeProvider::GitLab),
             "gitea" => Ok(ForgeProvider::Gitea),
+            "cnb" => Ok(ForgeProvider::Cnb),
             other => Err(ForgeError::Invalid(format!("unknown provider: {other}"))),
         }
     }
@@ -64,6 +73,7 @@ impl ForgeProvider {
             ForgeProvider::GitHub => "GitHub",
             ForgeProvider::GitLab => "GitLab",
             ForgeProvider::Gitea => "Gitea",
+            ForgeProvider::Cnb => "CNB",
         }
     }
 
@@ -76,6 +86,9 @@ impl ForgeProvider {
         match self {
             ForgeProvider::GitHub | ForgeProvider::Gitea => "pull request",
             ForgeProvider::GitLab => "merge request",
+            // CNB's own UI and API documentation call it a 合并请求 / merge
+            // request, even though the REST path is `/pulls`.
+            ForgeProvider::Cnb => "merge request",
         }
     }
 
@@ -93,7 +106,9 @@ impl ForgeProvider {
     /// check out a Gitea fork's head without adding a remote.
     pub fn change_head_ref(self, number: i64) -> String {
         match self {
-            ForgeProvider::GitHub | ForgeProvider::Gitea => format!("refs/pull/{number}/head"),
+            ForgeProvider::GitHub | ForgeProvider::Gitea | ForgeProvider::Cnb => {
+                format!("refs/pull/{number}/head")
+            }
             ForgeProvider::GitLab => format!("refs/merge-requests/{number}/head"),
         }
     }
@@ -139,6 +154,15 @@ impl ForgeProvider {
                     ForgeItemKind::Change => "pulls",
                 };
                 format!("{origin}/{owner_repo}/{segment}/{number}")
+            }
+            ForgeProvider::Cnb => {
+                // The `/-/` separator, as on GitLab — CNB nests both
+                // collections under it and uses `pulls` for the change.
+                let segment = match kind {
+                    ForgeItemKind::Issue => "issues",
+                    ForgeItemKind::Change => "pulls",
+                };
+                format!("{origin}/{owner_repo}/-/{segment}/{number}")
             }
         }
     }
@@ -209,10 +233,10 @@ pub enum ForgeError {
     /// The host is not one codeg can read: nothing is configured for it and its
     /// name claims none of the forges. Distinct from [`ForgeError::NoAccount`]
     /// because the advice differs — "add a GitHub account for bitbucket.org"
-    /// is advice that cannot work, while "only GitHub, GitLab and Gitea are
-    /// supported" is the actual answer (with adding an account still the way
+    /// is advice that cannot work, while "only GitHub, GitLab, Gitea and CNB
+    /// are supported" is the actual answer (with adding an account still the way
     /// in for a self-hosted instance under an unrelated name).
-    #[error("unsupported forge host {host}: only GitHub, GitLab and Gitea are supported")]
+    #[error("unsupported forge host {host}: only GitHub, GitLab, Gitea and CNB are supported")]
     UnsupportedHost { host: String },
     /// The host answered in a way only the OTHER forge answers — codeg had it
     /// classified wrong and now knows better. Recoverable by construction: the
@@ -318,6 +342,13 @@ pub fn source_key(
     Ok(format!("{provider}:{host}:{repo}:{kind}:{number}"))
 }
 
+/// The work item number a key built by [`source_key`] ends with. No segment
+/// before it can hold a `:` (the host and the repository are both refused
+/// with one), so the last segment is always the number.
+pub fn source_key_number(key: &str) -> Option<i64> {
+    key.rsplit(':').next()?.parse().ok()
+}
+
 /// Repository-identity comparison. GitHub preserves canonical casing in API
 /// responses (`microsoft/TypeScript`) while our keys and remotes normalize to
 /// lowercase — an exact string compare would reject the right PR or mistake a
@@ -421,6 +452,12 @@ pub struct ForgeSourceMeta {
     pub head_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_pr: Option<String>,
+    /// Number of `result_pr`, written with it. What lets a task that stayed in
+    /// review after delivering push its next round INTO that pull request
+    /// rather than looking one up by branch again. Absent on rows delivered
+    /// before it was recorded — every one of them `done`, so nothing reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_pr_number: Option<i64>,
     /// For a pull-request task, the pull request's head that the task's last
     /// push-back went onto: read from the forge right before that push, and
     /// under the task's branch since the push was a fast-forward. The latest
@@ -440,6 +477,77 @@ pub struct ForgeSourceMeta {
     /// which is the posture the old folder setting shipped with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback: Option<bool>,
+    /// Every issue of a task made from several related issues, in the task's
+    /// own order — the lead (the one `number`, `url` and `title` above name)
+    /// first. Empty, and absent from the JSON, on a task triggered from one
+    /// item: that one is the fields above. A display snapshot like the rest of
+    /// this struct; which items a task handles is QUERIED from
+    /// `work_task_source_key`, never from here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<ForgeSourceItem>,
+    /// Which of `items` the pull request this task opens closes — chosen by
+    /// the user at the task's first delivery and fixed from then on, so every
+    /// pull request the task ever opens (the first one, a replacement for one
+    /// closed since, the one a crash recovery adopted) closes the same issues.
+    /// The others are referenced, not closed. Absent until that first delivery,
+    /// and always on a single-item task, whose pull request closes its issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_closes: Option<Vec<i64>>,
+}
+
+/// One issue of a task made from several related issues (see
+/// [`ForgeSourceMeta::items`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForgeSourceItem {
+    pub number: i64,
+    /// Canonical html URL — server-derived, like [`ForgeSourceMeta::url`].
+    pub url: String,
+    /// Title at trigger time (display only; the prompt carries its own copy).
+    pub title: String,
+}
+
+impl ForgeSourceMeta {
+    /// Whether the task handles several items rather than one.
+    pub fn is_combined(&self) -> bool {
+        self.items.len() > 1
+    }
+
+    /// The numbers of every item the task handles, lead first.
+    pub fn item_numbers(&self) -> Vec<i64> {
+        if self.items.is_empty() {
+            vec![self.number]
+        } else {
+            self.items.iter().map(|item| item.number).collect()
+        }
+    }
+}
+
+/// Where a task WITHOUT forge provenance delivers its work: the repository its
+/// project folder's `origin` names, on a forge codeg speaks, and the account
+/// that speaks for that host.
+///
+/// Resolved from the checkout at the task's first delivery and pinned from
+/// then on (in [`WorkTaskDelivery`]) — the same rule a forge-sourced task
+/// follows with the account that triggered it: a later default-account flip,
+/// or an `origin` pointed somewhere else, must not quietly change who pushes,
+/// or into which repository the task's pull request is updated.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeliveryTarget {
+    pub provider: ForgeProvider,
+    pub server_host: String,
+    pub account_id: String,
+    pub owner_repo: String,
+}
+
+/// Stored in `work_task.delivery` (JSON) for a task without forge provenance,
+/// mirrored to the frontend as `WorkTaskDelivery` in `src/lib/types.ts`: where
+/// it delivered, and the pull request the latest delivery settled against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkTaskDelivery {
+    #[serde(flatten)]
+    pub target: DeliveryTarget,
+    pub pr_url: String,
+    pub pr_number: i64,
 }
 
 /// Pages one auto-processing scan reads per collection before it hands the
@@ -1767,6 +1875,10 @@ pub fn web_origin(auth: &ResolvedAuth) -> String {
     let base = auth.api_base.trim_end_matches('/');
     if base == "https://api.github.com" {
         return "https://github.com".to_string();
+    }
+    // CNB's API lives on its own host, with the web UI a bare label away.
+    if base == "https://api.cnb.cool" {
+        return "https://cnb.cool".to_string();
     }
     match ["/api/v3", "/api/v4", "/api/v1"]
         .iter()

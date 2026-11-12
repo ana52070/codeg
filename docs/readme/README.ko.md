@@ -31,7 +31,7 @@
 
 <table>
   <tr>
-    <td width="50%" valign="top">🧩 <strong>모든 에이전트를 하나의 인터페이스로</strong><br/>열아홉 개의 에이전트가 기본 내장되어 있고, ACP 에이전트라면 무엇이든 합류할 수 있습니다 — 모두 터미널이 아닌, 같은 구조화된 대화로 표시됩니다.</td>
+    <td width="50%" valign="top">🧩 <strong>모든 에이전트를 하나의 인터페이스로</strong><br/>스무 개의 에이전트가 기본 내장되어 있고, ACP 에이전트라면 무엇이든 합류할 수 있습니다 — 모두 터미널이 아닌, 같은 구조화된 대화로 표시됩니다.</td>
     <td width="50%" valign="top">🔎 <strong>에이전트를 넘나드는 세션</strong><br/>에이전트마다 디스크에 남겨 두는 기록을 가져와 검색하고 이어서 진행한 다음, 다른 에이전트에게 넘겨주세요.</td>
   </tr>
   <tr>
@@ -39,59 +39,6 @@
     <td width="50%" valign="top">🌍 <strong>어디서 일하든</strong><br/>데스크톱 앱, 자체 호스팅 서버나 Docker, iPhone, iPad, Android에서 — 그리고 Telegram, Lark 또는 WeChat에서도.</td>
   </tr>
 </table>
-
-## 💖 스폰서
-
-<table>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg" target="_blank"><img src="../images/compshare.png" alt="Compshare" width="160" /></a><br/>
-      <strong><a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">Compshare(UCloud)</a></strong>
-    </td>
-    <td>본 프로젝트를 후원해 주신 Compshare에 감사드립니다! Compshare는 UCloud 산하의 AI 클라우드 플랫폼으로, 월정액·종량제 방식의 가성비 높은 국내 모델 agent Plan 요금제를 월 49위안부터 제공합니다. 또한 안정적인 공식 프록시 방식의 해외 모델 접근도 지원합니다. Claude Code, Codex 및 API 연동을 지원하며, 기업 환경의 높은 동시성, 7×24 기술 지원, 셀프 인보이스 발급도 지원합니다. <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">이 링크</a>를 통해 가입하시면 무료 5위안 플랫폼 체험 크레딧을 받으실 수 있습니다!</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://hezu.ink/sign-up?aff=0wVz" target="_blank"><img src="../images/hezu-ink.jpg" alt="合租巴士" width="200" /></a><br/>
-      <strong><a href="https://hezu.ink/sign-up?aff=0wVz">合租巴士</a></strong>
-    </td>
-    <td>본 프로젝트를 후원해 주신 合租巴士에 감사드립니다! 合租巴士는 Codex, Claude Code 등 주요 모델에 대한 높은 안정성의 중계 기능을 제공하는 신뢰할 수 있고 효율적인 AI 중계 서비스 플랫폼입니다. 충전 비율이 투명하며(1:1), Codex 요율 보조는 최저 0.08까지 제공됩니다. <a href="https://hezu.ink/sign-up?aff=0wVz">공식 웹사이트에서 그룹에 참여하면 $5 체험 크레딧을 받을 수 있습니다</a>.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://go.apimart.ai/gh-codeg" target="_blank"><img src="../images/apimart-ai.png" alt="APIMart" width="200" /></a><br/>
-      <strong><a href="https://go.apimart.ai/gh-codeg">APIMart</a></strong>
-    </td>
-    <td>본 프로젝트를 후원해 주신 APIMart에 감사드립니다! APIMart는 AI 이미지·영상 생성에 특화된 저비용 API 플랫폼입니다. GPT-Image-2는 장당 $0.006부터라 1달러로 160장 이상을 생성할 수 있습니다. 이미지와 영상을 하나의 비동기 API로 처리합니다. 작업을 제출해 ID를 받고 폴링이나 콜백으로 결과를 가져오세요. 수만 장을 일괄 처리해도 타임아웃이 없고, 모델을 바꿔도 코드를 수정할 필요가 없습니다. 월 요금 없이 사용한 만큼만 지불합니다 — <a href="https://go.apimart.ai/gh-codeg">여기에서 가입</a>하면 바로 시작할 수 있습니다.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg" target="_blank"><img src="../images/astraflow.png" alt="UCloud ·星图AstraFlow" width="120" /></a><br/>
-      <strong><a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg">UCloud ·星图AstraFlow</a></strong>
-    </td>
-    <td>
-      <a href="https://www.ucloud.cn/site/active/astraflow?ytag=geo_waituo_codeg">UCloud ·星图AstraFlow</a><br/>
-      UCloud의 星图AstraFlow 대규모 모델 플랫폼은 200개 이상의 모델을 클릭 한 번으로 호출할 수 있습니다. Kimi K3, DeepSeek V4/V3, Qwen 3, GLM5.2, happyhorse 등 세계 최고 수준의 오픈소스 대규모 모델을 기본 제공하므로 직접 학습할 필요 없이 바로 사용할 수 있습니다.<br/>
-      위 링크에서 <strong>이메일</strong>로 가입하고 실명 인증을 마치면 <a href="https://f.howxm.com/xs/u/HVFW5X8EIYV1">50위안 상당의 컴퓨팅 크레딧을 받을 수 있습니다</a>.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG" target="_blank"><img src="../images/sidrune-ai.png" alt="Sidrune AI" width="200" /></a><br/>
-      <strong><a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG">Sidrune AI</a></strong>
-    </td>
-    <td>본 프로젝트를 후원해 주신 Sidrune AI에 감사드립니다! Sidrune AI는 하나의 API로 GPT, Claude 등 주요 AI 모델에 접근할 수 있게 해 줍니다. 신규 사용자는 <a href="https://fluxionai.space/register?source=github&campaign=github-sidrune-codeg&promo=SDRCODEG">전용 링크</a>에서 프로모션 코드 <code>SDRCODEG</code>로 가입하면 $3의 API 크레딧을 받을 수 있습니다.</td>
-  </tr>
-  <tr>
-    <td align="center" width="220">
-      <a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA" target="_blank"><img src="../images/beeapi.jpg" alt="BeeAPI" width="200" /></a><br/>
-      <strong><a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA">BeeAPI</a></strong>
-    </td>
-    <td>본 프로젝트를 후원해 주신 <a href="https://beeapi.ai/signup?aff=HIAB5JCVRNNA">BeeAPI</a>에 감사드립니다! BeeAPI는 전문적인 멀티 모델 AI API 중계·통합 플랫폼으로, 여러 공급업체와 다양한 주요 AI 모델을 한데 모았습니다. 업체 간 가격 비교, 그룹별 스마트 라우팅, 통합 API 연동 및 과금을 지원하여 더 유연하고 안정적이며 저렴하게 AI 서비스를 호출할 수 있습니다.</td>
-  </tr>
-</table>
-
-> Codeg의 스폰서가 되고 싶으신가요? [이메일로 문의해 주세요.](mailto:itpkcn@gmail.com)
 
 ## ✨ 주요 기능
 
@@ -101,7 +48,7 @@
 
 ### 모든 에이전트를 하나의 인터페이스로
 
-내장 에이전트 19개와 모든 ACP 에이전트를 한 화면에서. 도구 카드, 실시간 diff, 대화형 응답을 제공합니다.
+내장 에이전트 20개와 모든 ACP 에이전트를 한 화면에서. 도구 카드, 실시간 diff, 대화형 응답을 제공합니다.
 
 [문서 →](https://docs.codeg.app/guide/supported-agents) · [커스텀 에이전트 →](https://docs.codeg.app/guide/custom-agents) · [UI 렌더링 →](https://docs.codeg.app/guide/skills#cards-tables-and-charts-in-replies)
 
@@ -273,7 +220,7 @@ git diff | codeg-cli -a codex \
 
 ## 🤖 지원 에이전트
 
-Codeg는 모든 에이전트와 [Agent Client Protocol](https://agentclientprotocol.com)로 통신하므로, 에이전트마다 같은 구조화된 인터페이스를 갖습니다. 열아홉 개가 기본 내장되어 있으며, 그중 대부분은 Codeg가 대신 설치하고, 버전을 고정하고, 업데이트합니다:
+Codeg는 모든 에이전트와 [Agent Client Protocol](https://agentclientprotocol.com)로 통신하므로, 에이전트마다 같은 구조화된 인터페이스를 갖습니다. 스무 개가 기본 내장되어 있으며, 그중 대부분은 Codeg가 대신 설치하고, 버전을 고정하고, 업데이트합니다:
 
 <p>
   <a href="https://www.anthropic.com/claude-code"><kbd><img src="../images/agents/claude-code.svg" alt="" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
@@ -285,6 +232,7 @@ Codeg는 모든 에이전트와 [Agent Client Protocol](https://agentclientproto
   <a href="https://hermes-agent.nousresearch.com"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/hermes-agent-dark.svg" /><img src="../images/agents/hermes-agent.svg" alt="" width="16" valign="middle" /></picture> Hermes Agent</kbd></a> &nbsp;
   <a href="https://www.codebuddy.ai"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/codebuddy-dark.svg" /><img src="../images/agents/codebuddy.svg" alt="" width="16" valign="middle" /></picture> CodeBuddy</kbd></a> &nbsp;
   <a href="https://www.kimi.com/code"><kbd><img src="../images/agents/kimi-code.svg" alt="" width="16" valign="middle" /> Kimi Code</kbd></a> &nbsp;
+  <a href="../agents/minimax-code.md"><kbd><img src="../images/agents/minimax-code.svg" alt="" width="16" valign="middle" /> MiniMax Code</kbd></a> &nbsp;
   <a href="https://pi.dev"><kbd><img src="../images/agents/pi.svg" alt="" width="16" valign="middle" /> Pi</kbd></a> &nbsp;
   <a href="https://x.ai/cli"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/grok-dark.svg" /><img src="../images/agents/grok.svg" alt="" width="16" valign="middle" /></picture> Grok</kbd></a> &nbsp;
   <a href="https://cursor.com/cli"><kbd><picture><source media="(prefers-color-scheme: dark)" srcset="../images/agents/cursor-dark.svg" /><img src="../images/agents/cursor.svg" alt="" width="16" valign="middle" /></picture> Cursor</kbd></a> &nbsp;

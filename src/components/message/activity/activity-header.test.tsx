@@ -43,7 +43,7 @@ function renderHeader(
       />
     </NextIntlClientProvider>
   )
-  return document.querySelector<HTMLElement>(".ws-msg-chip")!
+  return document.querySelector<HTMLElement>(".activity-capsule")!
 }
 
 describe("ActivityHeader", () => {
@@ -90,6 +90,25 @@ describe("ActivityHeader", () => {
   it("shows no time while the turn runs", () => {
     const capsule = renderHeader(summaryOf({ steps: 3 }), { completed: false })
     expect(capsule.textContent).toBe("Working3 steps")
+  })
+
+  it.each([
+    ["one that folds", true],
+    ["one that cannot", false],
+  ])("leaves nothing in the capsule to select: %s", (_, folds) => {
+    // A quick second press on the capsule selected a word in it, and the
+    // transcript's copy bubble came up over it.
+    const capsule = renderHeader(
+      summaryOf({ steps: 4, failed: 1, unrecovered: 1 }),
+      { folds }
+    )
+    expect(capsule.getAttribute("class")!.split(/\s+/)).toContain("select-none")
+    // It reaches every word inside; nothing in there turns selection back on.
+    for (const element of capsule.querySelectorAll("*")) {
+      expect(element.getAttribute("class") ?? "").not.toMatch(
+        /(^|\s)select-(text|all|auto)(\s|$)/
+      )
+    }
   })
 
   it("gives way in a narrow column: the summary first, then the label", () => {

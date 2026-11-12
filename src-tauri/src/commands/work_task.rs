@@ -635,28 +635,47 @@ pub async fn work_task_merge_unqueue_core(
     Ok(())
 }
 
-/// Accept a reviewed forge-sourced task by pushing it back to the repository
-/// it came from: an issue's task opens (or adopts) a pull request for its own
-/// branch, a pull request's task pushes onto that pull request's branch.
-/// Returns the pull request URL.
+/// Accept a reviewed task by delivering it to a forge: an issue's task opens
+/// (or adopts) a pull request for its own branch, a pull request's task pushes
+/// onto that pull request's branch, and a task without forge provenance opens
+/// one on the repository its project's `origin` names. Returns the pull
+/// request URL.
 ///
 /// Unlike the merge dispatch this awaits the WHOLE operation — a push plus two
 /// REST calls, no agent — so both success and failure land in the caller's
 /// dialog. Every gate is inside the engine, where a direct API call cannot
 /// route around it.
 ///
-/// `delete_worktree` takes the checkout along once the delivery lands, the
-/// same offer the merge and complete acceptances make. It never changes the
-/// result: a removal that fails leaves a retryable `cleanup_state` on the card
-/// and the delivered URL still comes back.
+/// `mark_done` (default `true`: what every delivery did before the choice
+/// existed) finishes the task; `false` keeps it in review with the pull
+/// request recorded, for another round that pushes into the same pull request.
+///
+/// `delete_worktree` takes the checkout along once a delivery that finishes
+/// the task lands, the same offer the merge and complete acceptances make. It
+/// never changes the result: a removal that fails leaves a retryable
+/// `cleanup_state` on the card and the delivered URL still comes back.
+///
+/// `closes` is which issues the pull request closes, for a task made from
+/// several related issues only — chosen at its first delivery and fixed from
+/// then on (see `engine::closing_list`). `None` keeps the list already fixed,
+/// or closes them all on a first delivery.
 pub async fn work_task_deliver_pr_core(
     id: i32,
     pr_title: Option<String>,
     draft: bool,
     delete_worktree: bool,
+    mark_done: Option<bool>,
+    closes: Option<Vec<i64>>,
 ) -> Result<String, DbError> {
     engine()?
-        .deliver_pr(id, pr_title, draft, delete_worktree)
+        .deliver_pr_closing(
+            id,
+            pr_title,
+            draft,
+            delete_worktree,
+            mark_done.unwrap_or(true),
+            closes,
+        )
         .await
         .map_err(DbError::Validation)
 }
@@ -1069,8 +1088,10 @@ pub async fn work_task_deliver_pr(
     pr_title: Option<String>,
     draft: bool,
     delete_worktree: bool,
+    mark_done: Option<bool>,
+    closes: Option<Vec<i64>>,
 ) -> Result<String, DbError> {
-    work_task_deliver_pr_core(id, pr_title, draft, delete_worktree).await
+    work_task_deliver_pr_core(id, pr_title, draft, delete_worktree, mark_done, closes).await
 }
 
 #[cfg(feature = "tauri-runtime")]
