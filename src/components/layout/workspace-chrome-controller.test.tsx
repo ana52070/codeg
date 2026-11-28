@@ -102,16 +102,29 @@ vi.mock("@/contexts/search-dialog-context", () => ({
 vi.mock("@/hooks/use-shortcut-settings", () => ({
   useShortcutSettings: () => ({ shortcuts: state.shortcuts }),
 }))
-vi.mock("@/stores/app-workspace-store", () => ({
-  isConversationDeleted: () => false,
-  useAppWorkspaceStore: { getState: () => ({ getFolder: () => null }) },
-}))
+vi.mock("@/stores/app-workspace-store", () => {
+  const stateSlice = {
+    relocateDialogFolderId: null,
+    closeRelocateFolderDialog: vi.fn(),
+    getFolder: () => null,
+  }
+  const useAppWorkspaceStore = <T,>(selector?: (s: typeof stateSlice) => T) =>
+    selector ? selector(stateSlice) : stateSlice
+  useAppWorkspaceStore.getState = () => stateSlice
+  return {
+    isConversationDeleted: () => false,
+    useAppWorkspaceStore,
+  }
+})
 vi.mock("@/lib/closed-tab-stack", () => ({ popClosedTab: () => null }))
 vi.mock("@/components/conversations/search-command-dialog", () => ({
   SearchCommandDialog: () => null,
 }))
 vi.mock("@/components/layout/workspace-folder-dialog", () => ({
   WorkspaceFolderDialog: () => null,
+}))
+vi.mock("@/components/layout/relocate-folder-dialog", () => ({
+  RelocateFolderDialog: () => null,
 }))
 vi.mock("@/lib/transport", () => ({
   isDesktop: () => state.desktop,

@@ -7,12 +7,14 @@ import {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
+  AlertTriangle,
   Check,
   Copy,
   Download,
   FileCode,
   FileImage,
   FileText,
+  FolderInput,
   Info,
   Loader2,
   Plus,
@@ -37,7 +39,10 @@ import { formatConversationTitle } from "@/lib/conversation-title"
 import { useAskConversationDrawerStore } from "@/stores/ask-conversation-drawer-store"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
 import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import {
+  isRelocatableFolder,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 import { FolderTabsEmptyState } from "@/components/conversations/folder-tabs-empty-state"
 import { useTabActions, useTabStore } from "@/contexts/tab-context"
 import {
@@ -299,6 +304,9 @@ const ConversationTabView = memo(function ConversationTabView({
     (s) => s.refreshConversations
   )
   const upsertFolder = useAppWorkspaceStore((s) => s.upsertFolder)
+  const canRelocateFolderPath = useAppWorkspaceStore(
+    (s) => s.canRelocateFolderPath
+  )
   // Subscribe to ONLY this tab's own row (identified by `tabId`), not the whole
   // `tabs` array — so a sibling tab changing, or a tab-switch (isActive rides in
   // as a prop), never re-renders this keep-alive panel. `find` returns the same
@@ -318,6 +326,9 @@ const ConversationTabView = memo(function ConversationTabView({
     ownFolderId != null
       ? (s.allFolders.find((f) => f.id === ownFolderId) ?? null)
       : null
+  )
+  const isFolderMissingOnDisk = useAppWorkspaceStore((s) =>
+    ownFolderId != null ? s.missingFolderIds.has(ownFolderId) : false
   )
   const folderId = ownFolderId ?? 0
   const {
@@ -711,6 +722,7 @@ const ConversationTabView = memo(function ConversationTabView({
     configOptionsLoading,
     selectorsLoading,
     autoConnectError,
+    missingWorkingDir,
     handleFocus,
     handleSend: lifecycleSend,
     handleSetConfigOption,
@@ -890,6 +902,32 @@ const ConversationTabView = memo(function ConversationTabView({
   // actionable one and, unlike the connect-time toast, it's deterministic — it
   // appears the moment a not-installed agent is selected, independent of whether
   // a (deduped/superseded) connect attempt ever reached the preflight.
+  const missingFolderPath =
+    missingWorkingDir ??
+    (isFolderMissingOnDisk
+      ? (folder?.path ?? workingDirForConnection ?? null)
+      : null)
+  const canRelocateMissingFolder =
+    ownTab?.isChat !== true &&
+    !isChatDraft &&
+    (folder
+      ? isRelocatableFolder(folder)
+      : missingFolderPath != null && canRelocateFolderPath(missingFolderPath))
+
+  const handleOpenRelocateFolder = useCallback(() => {
+    const store = useAppWorkspaceStore.getState()
+    if (ownFolderId != null) {
+      store.openRelocateFolderDialog(ownFolderId)
+      return
+    }
+    const targetPath = missingFolderPath ?? workingDirForConnection
+    if (targetPath) {
+      store.openRelocateFolderDialogByPath(targetPath)
+    }
+  }, [ownFolderId, missingFolderPath, workingDirForConnection])
+
+  const isMissingWorkingDirBlocked =
+    !selectedAgentNotInstalled && Boolean(missingFolderPath)
   const composerBlockedMessage = selectedAgentNotInstalled
     ? tWelcome(
         selectedAgentIsAcpAdapter
@@ -897,7 +935,12 @@ const ConversationTabView = memo(function ConversationTabView({
           : "agentNotInstalled",
         { agent: getAgentLabel(selectedAgent) }
       )
-    : (autoConnectError ?? agentConnectError)
+    : isMissingWorkingDirBlocked &&
+        !autoConnectError &&
+        !agentConnectError &&
+        missingFolderPath
+      ? t("missingFolderBanner", { path: missingFolderPath })
+      : (autoConnectError ?? agentConnectError)
 
   useEffect(() => {
     if (connSessionId) {
@@ -2299,6 +2342,32 @@ const ConversationTabView = memo(function ConversationTabView({
   // instead the failure lands here, as a banner docked where the composer
   // sits, carrying the same Reload / New session recovery actions. Persisted
   // conversations only: drafts never session/load.
+  const missingFolderBanner =
+    hasPersistedConversation && missingFolderPath ? (
+      <div
+        role="alert"
+        className="flex w-full flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200"
+      >
+        <AlertTriangle
+          aria-hidden="true"
+          className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400"
+        />
+        <span className="min-w-40 flex-1 break-words" title={missingFolderPath}>
+          {t("missingFolderBanner", { path: missingFolderPath })}
+        </span>
+        {canRelocateMissingFolder ? (
+          <button
+            type="button"
+            onClick={handleOpenRelocateFolder}
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded border border-amber-500/40 bg-background/60 px-2.5 py-1 font-medium text-amber-900 transition-colors hover:bg-amber-500/20 dark:text-amber-100"
+          >
+            <FolderInput aria-hidden="true" className="h-3.5 w-3.5" />
+            {t("relocatePathAction")}
+          </button>
+        ) : null}
+      </div>
+    ) : null
+
   const acpLoadErrorBanner =
     hasPersistedConversation && acpLoadError ? (
       // `flex-wrap` + a message floor, because the actions are all `shrink-0`
@@ -2488,7 +2557,8 @@ const ConversationTabView = memo(function ConversationTabView({
   // bubble offers "quote" exactly when that composer is on screen (see
   // `hideInput` below). Without a composer the inject would never be consumed
   // and the action would silently do nothing.
-  const composerAvailable = !isWelcomeMode && !acpLoadError
+  const composerAvailable =
+    !isWelcomeMode && !acpLoadError && !missingFolderPath
 
   // Arrow-key history source: read lazily when the user actually steps into
   // history, so streaming tokens neither recompute it nor re-render the panel.
@@ -2752,10 +2822,12 @@ const ConversationTabView = memo(function ConversationTabView({
       promptSuggestion={connIsForOtherAgent ? null : conn.promptSuggestion}
       attachmentTabId={tabId}
       draftStorageKey={draftStorageKey}
-      hideInput={isWelcomeMode || Boolean(acpLoadError)}
+      hideInput={
+        isWelcomeMode || Boolean(acpLoadError) || Boolean(missingFolderPath)
+      }
       injectContent={composerInject}
       onInjectConsumed={handleComposerInjectConsumed}
-      composerBanner={acpLoadErrorBanner}
+      composerBanner={missingFolderBanner ?? acpLoadErrorBanner}
       feedbackList={
         feedback.showList ? (
           <FeedbackNotesDisplay
@@ -2849,14 +2921,27 @@ const ConversationTabView = memo(function ConversationTabView({
               </div>
               {composerBlockedMessage ? (
                 <div className="flex w-full items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                  <button
-                    type="button"
-                    onClick={handleOpenAgentsSettings}
-                    title={composerBlockedMessage}
-                    className="min-w-0 flex-1 cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap text-left transition-colors hover:text-destructive/80"
-                  >
-                    {composerBlockedMessage}
-                  </button>
+                  {!isMissingWorkingDirBlocked || canRelocateMissingFolder ? (
+                    <button
+                      type="button"
+                      onClick={
+                        isMissingWorkingDirBlocked
+                          ? handleOpenRelocateFolder
+                          : handleOpenAgentsSettings
+                      }
+                      title={composerBlockedMessage}
+                      className="min-w-0 flex-1 cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap text-left transition-colors hover:text-destructive/80"
+                    >
+                      {composerBlockedMessage}
+                    </button>
+                  ) : (
+                    <span
+                      title={composerBlockedMessage}
+                      className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left"
+                    >
+                      {composerBlockedMessage}
+                    </span>
+                  )}
                   {selectedAgentNotInstalled ? (
                     <button
                       type="button"
@@ -2864,6 +2949,15 @@ const ConversationTabView = memo(function ConversationTabView({
                       className="shrink-0 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
                     >
                       {tDiag("button")}
+                    </button>
+                  ) : isMissingWorkingDirBlocked && canRelocateMissingFolder ? (
+                    <button
+                      type="button"
+                      onClick={handleOpenRelocateFolder}
+                      className="flex shrink-0 cursor-pointer items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
+                    >
+                      <FolderInput aria-hidden="true" className="h-3 w-3" />
+                      {t("relocatePathAction")}
                     </button>
                   ) : null}
                 </div>
@@ -2929,14 +3023,27 @@ const ConversationTabView = memo(function ConversationTabView({
             />
             {composerBlockedMessage ? (
               <div className="mt-2 flex w-full items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                <button
-                  type="button"
-                  onClick={handleOpenAgentsSettings}
-                  title={composerBlockedMessage}
-                  className="min-w-0 flex-1 cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap text-left transition-colors hover:text-destructive/80"
-                >
-                  {composerBlockedMessage}
-                </button>
+                {!isMissingWorkingDirBlocked || canRelocateMissingFolder ? (
+                  <button
+                    type="button"
+                    onClick={
+                      isMissingWorkingDirBlocked
+                        ? handleOpenRelocateFolder
+                        : handleOpenAgentsSettings
+                    }
+                    title={composerBlockedMessage}
+                    className="min-w-0 flex-1 cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap text-left transition-colors hover:text-destructive/80"
+                  >
+                    {composerBlockedMessage}
+                  </button>
+                ) : (
+                  <span
+                    title={composerBlockedMessage}
+                    className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left"
+                  >
+                    {composerBlockedMessage}
+                  </span>
+                )}
                 {selectedAgentNotInstalled ? (
                   <button
                     type="button"
@@ -2944,6 +3051,15 @@ const ConversationTabView = memo(function ConversationTabView({
                     className="shrink-0 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
                   >
                     {tDiag("button")}
+                  </button>
+                ) : isMissingWorkingDirBlocked && canRelocateMissingFolder ? (
+                  <button
+                    type="button"
+                    onClick={handleOpenRelocateFolder}
+                    className="flex shrink-0 cursor-pointer items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
+                  >
+                    <FolderInput aria-hidden="true" className="h-3 w-3" />
+                    {t("relocatePathAction")}
                   </button>
                 ) : null}
               </div>

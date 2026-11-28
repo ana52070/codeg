@@ -29,6 +29,8 @@ vi.mock("@/lib/api", () => ({
   updateFolderGroup: vi.fn(),
   deleteFolderGroup: vi.fn(),
   setFolderGroup: vi.fn(),
+  checkDirectoriesExist: vi.fn(async () => ({})),
+  relocateFolderPath: vi.fn(),
 }))
 
 const {
@@ -37,12 +39,18 @@ const {
   listAllFolderDetails,
   listOpenFolderDetails,
   listFolderGroups: readFolderGroups,
+  checkDirectoriesExist,
+  relocateFolderPath,
+  listAllConversations,
 } = await import("@/lib/api")
 const mockGetFolder = vi.mocked(getFolder)
 const mockGetGitHead = vi.mocked(getGitHead)
 const mockListAllFolders = vi.mocked(listAllFolderDetails)
 const mockListOpenFolders = vi.mocked(listOpenFolderDetails)
 const mockListFolderGroups = vi.mocked(readFolderGroups)
+const mockCheckDirectoriesExist = vi.mocked(checkDirectoriesExist)
+const mockRelocateFolderPath = vi.mocked(relocateFolderPath)
+const mockListAllConversations = vi.mocked(listAllConversations)
 
 function makeSummary(
   overrides: Partial<DbConversationSummary> & { id: number }
@@ -900,5 +908,170 @@ describe("ensureGitHead — HEAD for a folder the poll doesn't cover", () => {
     expect(useAppWorkspaceStore.getState().gitHeads.get(9)?.branch).toBe(
       "task/new"
     )
+  })
+})
+
+describe("missing folders and relocation", () => {
+  beforeEach(() => {
+    mockCheckDirectoriesExist.mockReset().mockResolvedValue({})
+    mockRelocateFolderPath.mockReset()
+    mockGetGitHead.mockReset().mockResolvedValue({
+      is_repo: false,
+      branch: null,
+      detached: false,
+      short_sha: null,
+    })
+    mockListAllConversations.mockReset()
+  })
+
+  it("detects missing open folders while skipping chat and personal folders", async () => {
+    const f1 = makeFolder({ id: 1, path: "/missing/one", kind: "regular" })
+    const f2 = makeFolder({ id: 2, path: "/present/two", kind: "regular" })
+    const chat = makeFolder({ id: 3, path: "/missing/chat", kind: "chat" })
+    const personal = makeFolder({
+      id: 4,
+      path: "/missing/personal",
+      kind: "personal",
+    })
+    useAppWorkspaceStore.setState({
+      folders: [f1, f2, chat, personal],
+      allFolders: [f1, f2, chat, personal],
+    })
+    mockCheckDirectoriesExist.mockResolvedValue({
+      "/missing/one": false,
+      "/present/two": true,
+    })
+
+    await useAppWorkspaceStore.getState().checkMissingFolders()
+
+    expect(mockCheckDirectoriesExist).toHaveBeenCalledWith([
+      "/missing/one",
+      "/present/two",
+    ])
+    expect(
+      Array.from(useAppWorkspaceStore.getState().missingFolderIds)
+    ).toEqual([1])
+
+    mockCheckDirectoriesExist.mockResolvedValue({
+      "/missing/one": true,
+      "/present/two": true,
+    })
+    await useAppWorkspaceStore.getState().checkMissingFolders()
+    expect(useAppWorkspaceStore.getState().missingFolderIds.size).toBe(0)
+  })
+
+  it("ignores stale out-of-order checkMissingFolders responses", async () => {
+    const f1 = makeFolder({ id: 1, path: "/repo/a", kind: "regular" })
+    useAppWorkspaceStore.setState({ folders: [f1], allFolders: [f1] })
+
+    let resolveFirst!: (val: Record<string, boolean>) => void
+    mockCheckDirectoriesExist
+      .mockImplementationOnce(
+        () =>
+          new Promise((res) => {
+            resolveFirst = res
+          })
+      )
+      .mockResolvedValueOnce({ "/repo/a": true })
+
+    const first = useAppWorkspaceStore.getState().checkMissingFolders()
+    await useAppWorkspaceStore.getState().checkMissingFolders()
+    expect(useAppWorkspaceStore.getState().missingFolderIds.size).toBe(0)
+
+    resolveFirst({ "/repo/a": false })
+    await first
+    expect(useAppWorkspaceStore.getState().missingFolderIds.size).toBe(0)
+  })
+
+  it("opens and closes relocate dialog by id or normalized path", () => {
+    const f1 = makeFolder({
+      id: 10,
+      path: "D:\\Projects\\Demo",
+      kind: "regular",
+    })
+    const chat = makeFolder({ id: 11, path: "/chat/dir", kind: "chat" })
+    useAppWorkspaceStore.setState({
+      folders: [f1],
+      allFolders: [f1, chat],
+    })
+
+    useAppWorkspaceStore.getState().openRelocateFolderDialog(11)
+    expect(useAppWorkspaceStore.getState().relocateDialogFolderId).toBeNull()
+
+    useAppWorkspaceStore
+      .getState()
+      .openRelocateFolderDialogByPath("d:\\projects\\demo\\")
+    expect(useAppWorkspaceStore.getState().relocateDialogFolderId).toBe(10)
+
+    useAppWorkspaceStore.getState().closeRelocateFolderDialog()
+    expect(useAppWorkspaceStore.getState().relocateDialogFolderId).toBeNull()
+  })
+
+  it("relocates folder path, clears missing state, and refreshes metadata", async () => {
+    const oldFolder = makeFolder({ id: 7, name: "old", path: "/missing/old" })
+    const updated = makeFolder({
+      id: 7,
+      name: "new-name",
+      path: "/existing/new-name",
+      git_branch: "main",
+    })
+    useAppWorkspaceStore.setState({
+      folders: [oldFolder],
+      allFolders: [oldFolder],
+      missingFolderIds: new Set([7]),
+      gitHeads: new Map([
+        [
+          7,
+          { is_repo: true, branch: "stale", detached: false, short_sha: "111" },
+        ],
+      ]),
+    })
+    mockRelocateFolderPath.mockResolvedValue(updated)
+    mockCheckDirectoriesExist.mockResolvedValue({ "/existing/new-name": true })
+    mockGetGitHead.mockResolvedValue({
+      is_repo: true,
+      branch: "main",
+      detached: false,
+      short_sha: "abc1234",
+    })
+    mockListAllConversations.mockResolvedValue([])
+
+    const res = await useAppWorkspaceStore
+      .getState()
+      .relocateFolder(7, "/existing/new-name")
+
+    expect(res).toEqual(updated)
+    expect(mockRelocateFolderPath).toHaveBeenCalledWith(7, "/existing/new-name")
+    const st = useAppWorkspaceStore.getState()
+    expect(st.folders[0]).toEqual(updated)
+    expect(st.allFolders[0]).toEqual(updated)
+    expect(st.missingFolderIds.has(7)).toBe(false)
+    expect(st.branches.get(7)).toBe("main")
+    expect(mockListAllConversations).toHaveBeenCalled()
+    expect(mockGetGitHead).toHaveBeenCalledWith("/existing/new-name")
+  })
+
+  it("canRelocateFolderPath allows only regular folders matching the path", () => {
+    const regular = makeFolder({
+      id: 1,
+      path: "D:\\Work\\Repo",
+      kind: "regular",
+    })
+    const chat = makeFolder({ id: 2, path: "/chat/dir", kind: "chat" })
+    const personal = makeFolder({
+      id: 3,
+      path: "/personal/dir",
+      kind: "personal",
+    })
+    useAppWorkspaceStore.setState({
+      folders: [regular],
+      allFolders: [regular, chat, personal],
+    })
+
+    const st = useAppWorkspaceStore.getState()
+    expect(st.canRelocateFolderPath("d:\\work\\repo\\")).toBe(true)
+    expect(st.canRelocateFolderPath("/chat/dir")).toBe(false)
+    expect(st.canRelocateFolderPath("/personal/dir")).toBe(false)
+    expect(st.canRelocateFolderPath("/unknown/dir")).toBe(false)
   })
 })

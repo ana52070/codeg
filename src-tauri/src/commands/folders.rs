@@ -1052,6 +1052,160 @@ pub async fn update_folder_default_agent_core(
     Ok(detail)
 }
 
+/// Probe a batch of folder paths for directory existence on disk. Used by the
+/// workspace sidebar and focus-refresh check to mark folders whose directory
+/// was deleted, renamed, or unmounted without mutating `FolderDetail`.
+pub async fn check_directories_exist_core(
+    paths: Vec<String>,
+) -> Result<HashMap<String, bool>, AppCommandError> {
+    tokio::task::spawn_blocking(move || {
+        let mut results = HashMap::with_capacity(paths.len());
+        for raw in paths {
+            let trimmed = raw.trim();
+            let exists = !trimmed.is_empty() && Path::new(trimmed).is_dir();
+            results.insert(raw, exists);
+        }
+        results
+    })
+    .await
+    .map_err(|e| AppCommandError::task_execution_failed(format!("Directory check failed: {e}")))
+}
+
+fn normalize_relocate_target_path(raw: &str) -> Result<String, AppCommandError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppCommandError::invalid_input("Target path cannot be empty").with_i18n(
+            crate::app_error::FOLDER_RELOCATE_I18N_KEY_INVALID_DIR,
+            Default::default(),
+        ));
+    }
+    let p = Path::new(trimmed);
+    let cleaned = if p.parent().is_none() {
+        trimmed.to_string()
+    } else {
+        let stripped = trimmed.trim_end_matches(['/', '\\']);
+        if stripped.is_empty() || (stripped.len() == 2 && stripped.as_bytes()[1] == b':') {
+            trimmed.to_string()
+        } else {
+            stripped.to_string()
+        }
+    };
+    Ok(cleaned)
+}
+
+/// Relocate a regular workspace folder record to a new existing directory path
+/// while keeping its conversations (backfilling `origin_cwd` so history
+/// lookups and session resume continue seamlessly) and metadata intact.
+pub async fn relocate_folder_path_core(
+    emitter: &EventEmitter,
+    db: &AppDatabase,
+    manager: &crate::acp::manager::ConnectionManager,
+    folder_id: i32,
+    new_path: String,
+) -> Result<FolderDetail, AppCommandError> {
+    use crate::db::entities::folder::FolderKind;
+    use crate::db::service::conversation_service;
+    use crate::db::service::folder_service::RelocateFolderOutcome;
+
+    let normalized = normalize_relocate_target_path(&new_path)?;
+    let path_for_check = normalized.clone();
+    let exists = tokio::task::spawn_blocking(move || Path::new(&path_for_check).is_dir())
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(format!("Directory check failed: {e}")))?;
+    if !exists {
+        return Err(
+            AppCommandError::invalid_input("Target directory does not exist or is not a directory")
+                .with_i18n(
+                    crate::app_error::FOLDER_RELOCATE_I18N_KEY_INVALID_DIR,
+                    Default::default(),
+                ),
+        );
+    }
+
+    let existing = folder_service::get_folder_by_id(&db.conn, folder_id)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| {
+            AppCommandError::not_found("Folder not found").with_i18n(
+                crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+                Default::default(),
+            )
+        })?;
+    if existing.kind != FolderKind::Regular {
+        return Err(AppCommandError::not_found("Folder not found").with_i18n(
+            crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+            Default::default(),
+        ));
+    }
+
+    let conv_keys = conversation_service::list_folder_connection_keys(&db.conn, folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    let relocating: Vec<crate::acp::manager::RelocatingConversation> = conv_keys
+        .into_iter()
+        .map(|(id, agent_type, external_id)| crate::acp::manager::RelocatingConversation {
+            id,
+            agent_type,
+            external_id,
+        })
+        .collect();
+
+    let lock = manager
+        .lock_folder_connections(folder_id, &existing.path, &relocating)
+        .await;
+    if manager.busy_reason(&lock).await.is_some() {
+        drop(lock);
+        return Err(AppCommandError::task_execution_failed(
+            "Cannot change folder path while a conversation has an active turn",
+        )
+        .with_i18n(
+            crate::app_error::FOLDER_RELOCATE_I18N_KEY_BUSY,
+            Default::default(),
+        ));
+    }
+
+    let outcome = folder_service::relocate_folder_path(&db.conn, folder_id, &normalized)
+        .await
+        .map_err(AppCommandError::from)?;
+
+    match outcome {
+        RelocateFolderOutcome::NotFound => {
+            drop(lock);
+            Err(AppCommandError::not_found("Folder not found").with_i18n(
+                crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+                Default::default(),
+            ))
+        }
+        RelocateFolderOutcome::AlreadyExists => {
+            drop(lock);
+            Err(
+                AppCommandError::already_exists("Target directory is already open in Codeg")
+                    .with_i18n(
+                        crate::app_error::FOLDER_RELOCATE_I18N_KEY_ALREADY_EXISTS,
+                        Default::default(),
+                    ),
+            )
+        }
+        RelocateFolderOutcome::Relocated {
+            detail,
+            old_path,
+            affected_conversation_ids,
+            updated_conversation_ids,
+        } => {
+            let detail = *detail;
+            manager.mark_relocated(&affected_conversation_ids);
+            manager.disconnect_locked(lock).await;
+            crate::office_watch::stop_office_watches_under_root(&old_path);
+            emit_folder_upsert(emitter, detail.clone());
+            for conv_id in updated_conversation_ids {
+                crate::commands::conversations::emit_conversation_upsert(emitter, &db.conn, conv_id)
+                    .await;
+            }
+            Ok(detail)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tauri command wrappers (thin shims over _core)
 // ---------------------------------------------------------------------------
@@ -1217,6 +1371,34 @@ pub async fn set_folder_group(
 ) -> Result<(), AppCommandError> {
     set_folder_group_core(&EventEmitter::from_app(&app), &db, folder_id, group_id).await
 }
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn check_directories_exist(
+    paths: Vec<String>,
+) -> Result<HashMap<String, bool>, AppCommandError> {
+    check_directories_exist_core(paths).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn relocate_folder_path(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, AppDatabase>,
+    manager: tauri::State<'_, crate::acp::manager::ConnectionManager>,
+    folder_id: i32,
+    new_path: String,
+) -> Result<FolderDetail, AppCommandError> {
+    relocate_folder_path_core(
+        &EventEmitter::from_app(&app),
+        &db,
+        &manager,
+        folder_id,
+        new_path,
+    )
+    .await
+}
+
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
@@ -9874,4 +10056,84 @@ mod workspace_confinement_tests {
             "revoking the link revokes access"
         );
     }
+
+    #[tokio::test]
+    async fn check_directories_exist_reports_present_and_missing_paths() {
+        let existing = tempfile::tempdir().expect("existing");
+        let missing = existing.path().join("does-not-exist");
+        let existing_str = existing.path().to_string_lossy().into_owned();
+        let missing_str = missing.to_string_lossy().into_owned();
+
+        let map = check_directories_exist_core(vec![
+            existing_str.clone(),
+            missing_str.clone(),
+            "".to_string(),
+        ])
+        .await
+        .expect("check");
+        assert_eq!(map.get(&existing_str), Some(&true));
+        assert_eq!(map.get(&missing_str), Some(&false));
+        assert_eq!(map.get(""), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn relocate_folder_path_core_emits_folder_and_conversation_upserts() {
+        use crate::acp::manager::ConnectionManager;
+        use crate::db::service::conversation_service;
+        use crate::models::agent::AgentType;
+        use crate::web::event_bridge::{
+            EventEmitter, WebEventBroadcaster, CONVERSATION_CHANGED_EVENT, FOLDER_CHANGED_EVENT,
+        };
+
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let old_dir = tempfile::tempdir().expect("old");
+        let new_dir = tempfile::tempdir().expect("new");
+        let old_path = old_dir.path().to_string_lossy().into_owned();
+        let new_path = new_dir.path().to_string_lossy().into_owned();
+
+        let entry = folder_service::add_folder(&db.conn, &old_path)
+            .await
+            .expect("add_folder");
+        let conv = conversation_service::create(&db.conn, entry.id, AgentType::ClaudeCode, None, None)
+            .await
+            .expect("create_conv");
+
+        let broadcaster = WebEventBroadcaster::new();
+        let mut rx = broadcaster.subscribe();
+        let emitter = EventEmitter::from_broadcaster(broadcaster);
+        let mgr = ConnectionManager::new();
+
+        // Missing target fails cleanly with invalid_dir i18n key.
+        let missing_target = new_dir.path().join("nope").to_string_lossy().into_owned();
+        let err = relocate_folder_path_core(&emitter, &db, &mgr, entry.id, missing_target)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.i18n_key.as_deref(),
+            Some(crate::app_error::FOLDER_RELOCATE_I18N_KEY_INVALID_DIR)
+        );
+
+        let updated = relocate_folder_path_core(&emitter, &db, &mgr, entry.id, format!("{new_path}/"))
+            .await
+            .expect("relocate");
+        assert_eq!(updated.path, new_path);
+
+        let mut folder_events = 0;
+        let mut conv_events = 0;
+        while let Ok(evt) = rx.try_recv() {
+            match evt.channel.as_str() {
+                FOLDER_CHANGED_EVENT => folder_events += 1,
+                CONVERSATION_CHANGED_EVENT => conv_events += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(folder_events, 1);
+        assert_eq!(conv_events, 1);
+
+        let fresh_conv = conversation_service::get_by_id(&db.conn, conv.id)
+            .await
+            .expect("conv");
+        assert_eq!(fresh_conv.origin_cwd.as_deref(), Some(old_path.as_str()));
+    }
+
 }

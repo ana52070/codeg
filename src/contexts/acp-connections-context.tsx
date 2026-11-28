@@ -181,6 +181,7 @@ import {
 } from "@/lib/conversation-attention"
 import { rememberModelLabels } from "@/lib/model-label-store"
 import { useActiveFolder } from "@/contexts/active-folder-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
 /**
  * A session id we are willing to interpolate into a shell command we hand the
@@ -3667,6 +3668,8 @@ export interface ConnectErrorInfo {
   detail: string | null
   /** The fix lives in Settings → Agents (install, enable, configure). */
   opensAgentSettings: boolean
+  /** Present only when connect failed because the working directory is missing on disk. */
+  missingWorkingDir?: string
 }
 
 interface InternalStore {
@@ -4672,6 +4675,22 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
   const notifyConnectError = useCallback(
     (contextKey: string, info: ConnectErrorInfo) => {
       const actions: NotifyAction[] = []
+      if (
+        info.missingWorkingDir &&
+        useAppWorkspaceStore
+          .getState()
+          .canRelocateFolderPath(info.missingWorkingDir)
+      ) {
+        const missingPath = info.missingWorkingDir
+        actions.push({
+          label: t("actions.relocateFolder"),
+          onClick: () => {
+            useAppWorkspaceStore
+              .getState()
+              .openRelocateFolderDialogByPath(missingPath)
+          },
+        })
+      }
       if (info.opensAgentSettings) {
         actions.push({
           label: t("actions.openAgentsSettings"),
@@ -5568,6 +5587,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       agentLabel: string
     ): string => {
       switch (code) {
+        case "working_dir_missing":
+          return t("blocked.workingDirMissingTitle")
         case "initialize_timeout":
           return t("backendErrors.initializeTimeout", {
             agent: agentLabel,
@@ -6798,6 +6819,34 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             break
           }
           const errorAgentType = nc?.agentType
+          const errorActions: NotifyAction[] = []
+          if (
+            route.opensRelocateFolder &&
+            nc?.workingDir &&
+            useAppWorkspaceStore.getState().canRelocateFolderPath(nc.workingDir)
+          ) {
+            const missingPath = nc.workingDir
+            errorActions.push({
+              label: t("actions.relocateFolder"),
+              onClick: () => {
+                useAppWorkspaceStore
+                  .getState()
+                  .openRelocateFolderDialogByPath(missingPath)
+              },
+            })
+          }
+          if (route.opensAgentSettings && errorAgentType) {
+            errorActions.push({
+              label: t("actions.openAgentsSettings"),
+              onClick: () => {
+                openSettingsWindow("agents", {
+                  agentType: errorAgentType,
+                }).catch((err) => {
+                  console.error("[AcpConnections] open agent settings:", err)
+                })
+              },
+            })
+          }
           notify({
             level: route.level,
             // One per connection and code: the same refusal twice in a row, or
@@ -6806,24 +6855,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             title: text,
             description: reason,
             evidence,
-            actions:
-              route.opensAgentSettings && errorAgentType
-                ? [
-                    {
-                      label: t("actions.openAgentsSettings"),
-                      onClick: () => {
-                        openSettingsWindow("agents", {
-                          agentType: errorAgentType,
-                        }).catch((err) => {
-                          console.error(
-                            "[AcpConnections] open agent settings:",
-                            err
-                          )
-                        })
-                      },
-                    },
-                  ]
-                : undefined,
+            actions: errorActions.length > 0 ? errorActions : undefined,
           })
           break
         }
@@ -8363,6 +8395,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           // identifier, since `AcpError::Serialize` flattens to a bare
           // message string and does not expose the error `code` for
           // synchronous Tauri command rejections.
+          const missingDirPrefix = "working directory does not exist: "
+          const missingDirIdx = message.indexOf(missingDirPrefix)
           if (message.includes("is not installed")) {
             publishConnectError({
               agentType,
@@ -8371,6 +8405,21 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
                 : t("blocked.sdkMissing", { agent: agentLabel }),
               detail: null,
               opensAgentSettings: true,
+            })
+          } else if (missingDirIdx >= 0) {
+            const extractedPath = message
+              .slice(missingDirIdx + missingDirPrefix.length)
+              .split(/\r?\n/)[0]
+              ?.trim()
+            const missingPath = extractedPath || workingDir || ""
+            publishConnectError({
+              agentType,
+              title: t("blocked.workingDirMissingTitle"),
+              detail: missingPath
+                ? t("blocked.workingDirMissing", { path: missingPath })
+                : message,
+              opensAgentSettings: false,
+              ...(missingPath ? { missingWorkingDir: missingPath } : {}),
             })
           } else {
             publishConnectError({

@@ -7,11 +7,12 @@ use crate::db::error::DbError;
 // ─── Shared i18n keys ─────────────────────────────────────────────────
 //
 // The wire-format strings that backend errors stamp via `with_i18n` and
-// the frontend branches on via `extractAppCommandError(err).i18n_key`.
-// They live here — not in any individual command module — because the
-// same key can be emitted from multiple Rust sites (e.g.
-// `errors.upload.tooLarge` comes from `commands/remote_proxy.rs` AND
-// from `web/handlers/files.rs`) and consumed by a single TS branch.
+// the frontend branches on via `extractAppCommandError(err).i18n_key` or
+// passes through `toLocalizedErrorMessage`. They live here — not in any
+// individual command module — because the same key can be emitted from
+// multiple Rust sites (e.g. `errors.upload.tooLarge` comes from
+// `commands/remote_proxy.rs` AND from `web/handlers/files.rs`) and
+// consumed by a single TS branch.
 //
 // **MUST stay in lockstep with the TypeScript constants** in
 // `src/lib/api.ts` (`UPLOAD_I18N_KEY_TOO_LARGE` /
@@ -114,6 +115,21 @@ pub const CONFIG_SYNC_I18N_KEY_CREDENTIALS_UNREADABLE: &str =
 /// Encryption is on locally but the remote copy is not encrypted. Accepting it
 /// would let anyone who can write to the share undo the setting.
 pub const CONFIG_SYNC_I18N_KEY_NOT_ENCRYPTED: &str = "configSync.error.notEncrypted";
+
+// ─── Folder relocation i18n keys ─────────────────────────────────────
+//
+// Emitted by `commands::folders::relocate_folder_path_core` and resolved via
+// `toLocalizedErrorMessage` in `RelocateFolderDialog` (keys under
+// `Folder.relocate.errors.*` in `src/i18n/messages/*.json`).
+
+/// The target directory path is empty or does not exist as a directory on disk.
+pub const FOLDER_RELOCATE_I18N_KEY_INVALID_DIR: &str = "Folder.relocate.errors.invalidDir";
+/// Another active (non-deleted) folder in the database already uses the target path.
+pub const FOLDER_RELOCATE_I18N_KEY_ALREADY_EXISTS: &str = "Folder.relocate.errors.alreadyExists";
+/// A conversation in the folder has an active turn or blocking gate on a connection.
+pub const FOLDER_RELOCATE_I18N_KEY_BUSY: &str = "Folder.relocate.errors.busy";
+/// Source folder record does not exist or is not a regular workspace folder.
+pub const FOLDER_RELOCATE_I18N_KEY_NOT_FOUND: &str = "Folder.relocate.errors.notFound";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

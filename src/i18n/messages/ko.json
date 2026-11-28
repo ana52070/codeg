@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "별칭 입력 (비우면 지움)",
         "setAliasSave": "저장",
         "setAliasCancel": "취소",
-        "removeFromWorkspace": "워크스페이스에서 제거"
+        "removeFromWorkspace": "워크스페이스에서 제거",
+        "relocatePath": "경로 변경…"
       },
       "manageConversations": {
         "title": "대화 관리",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "어시스턴트",
       "timeGroupPrioritiesTooltip": "현재 실행 중인 세션이 포함됩니다",
       "recentGroupingModeTime": "시간별 그룹으로 전환",
-      "recentGroupingModeFlat": "일반 목록으로 전환"
+      "recentGroupingModeFlat": "일반 목록으로 전환",
+      "missingFolderBadge": "디스크에서 폴더를 찾을 수 없음",
+      "missingFolderNotice": "폴더가 삭제되었거나 이동됨",
+      "relocatePathAction": "경로 변경",
+      "removeFolderAction": "제거"
     },
     "conversation": {
       "reloadFailed": "대화 다시 불러오기 실패: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "오류",
         "turnFailed": "턴 실패"
       },
-      "moreActions": "추가 작업"
+      "moreActions": "추가 작업",
+      "missingFolderBanner": "\"{path}\" 폴더가 삭제되었거나 이동되었습니다. 경로를 업데이트하면 모든 대화 기록을 유지한 채 계속 대화할 수 있습니다.",
+      "relocatePathAction": "경로 변경"
     },
     "sessionDetails": {
       "menuLabel": "세션 세부 정보",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "다시 연결하면 에이전트가 재시작되어 진행 중인 작업이 중단됩니다.",
         "reconnect": "다시 연결",
         "reconnecting": "다시 연결하는 중...",
-        "reconnectUnavailable": "아직 다시 연결할 세션이 없습니다."
+        "reconnectUnavailable": "아직 다시 연결할 세션이 없습니다.",
+        "relocateFolder": "폴더 경로 변경"
       },
       "tasks": {
         "title": "작업"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "에이전트 설정 열기",
-          "retry": "다시 시도"
+          "retry": "다시 시도",
+          "relocateFolder": "경로 변경"
         },
         "blocked": {
           "missingConfig": "현재 에이전트 구성을 읽을 수 없습니다.",
           "disabled": "{agent}은(는) 에이전트 설정에서 비활성화되어 있습니다. 연결 전에 활성화하세요.",
           "unavailable": "{agent}은(는) 현재 플랫폼에서 사용할 수 없습니다.",
           "sdkMissing": "{agent} SDK가 설치되어 있지 않습니다",
-          "adapterMissing": "{agent}의 ACP 어댑터가 설치되어 있지 않습니다"
+          "adapterMissing": "{agent}의 ACP 어댑터가 설치되어 있지 않습니다",
+          "workingDirMissingTitle": "폴더가 삭제되었거나 이동됨",
+          "workingDirMissing": "디스크에 \"{path}\" 폴더가 없습니다. 계속하려면 경로를 변경하세요."
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 연결 핸드셰이크가 시간 초과되었습니다(60초 동안 응답 없음). 설정을 열어 에이전트 및 네트워크 구성을 확인하세요.",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "저장소 클론에 실패했습니다"
+    },
+    "relocate": {
+      "title": "폴더 경로 변경",
+      "description": "이 프로젝트의 새 디렉터리를 선택하세요. 기존 대화 기록은 모두 보존되며 계속 이어갈 수 있습니다.",
+      "currentPathLabel": "이전 경로",
+      "historyPreservedNote": "경로를 업데이트한 후에도 기존 AI 대화 기록을 그대로 보고 끊김 없이 이어갈 수 있습니다.",
+      "confirm": "경로 업데이트",
+      "relocatedToast": "\"{name}\" 경로를 {path}(으)로 업데이트했습니다",
+      "errors": {
+        "invalidDir": "선택한 경로가 존재하지 않거나 디렉터리가 아닙니다.",
+        "alreadyExists": "작업 영역의 다른 폴더가 이미 이 경로를 사용 중입니다.",
+        "busy": "경로를 변경하기 전에 이 폴더에서 진행 중인 에이전트 작업을 완료하거나 중지하세요.",
+        "notFound": "이 작업 영역 폴더를 찾을 수 없습니다."
+      }
     }
   },
   "ProjectBoot": {

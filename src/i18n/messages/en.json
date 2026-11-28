@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "Enter an alias (leave empty to clear)",
         "setAliasSave": "Save",
         "setAliasCancel": "Cancel",
-        "removeFromWorkspace": "Remove from workspace"
+        "removeFromWorkspace": "Remove from workspace",
+        "relocatePath": "Change path…"
       },
       "manageConversations": {
         "title": "Manage conversations",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "Assistants",
       "timeGroupPrioritiesTooltip": "Includes active sessions currently running",
       "recentGroupingModeTime": "Switch to time grouping",
-      "recentGroupingModeFlat": "Switch to flat list"
+      "recentGroupingModeFlat": "Switch to flat list",
+      "missingFolderBadge": "Folder missing on disk",
+      "missingFolderNotice": "Folder deleted or moved",
+      "relocatePathAction": "Change path",
+      "removeFolderAction": "Remove"
     },
     "conversation": {
       "reloadFailed": "Failed to reload conversation: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "Error",
         "turnFailed": "Turn failed"
       },
-      "moreActions": "More actions"
+      "moreActions": "More actions",
+      "missingFolderBanner": "The folder \"{path}\" has been deleted or moved. Update its path to keep chatting while preserving all conversation history.",
+      "relocatePathAction": "Change path"
     },
     "sessionDetails": {
       "menuLabel": "Session Details",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "Reconnecting restarts the agent and interrupts the work in progress.",
         "reconnect": "Reconnect",
         "reconnecting": "Reconnecting...",
-        "reconnectUnavailable": "Nothing to reconnect to yet."
+        "reconnectUnavailable": "Nothing to reconnect to yet.",
+        "relocateFolder": "Change Folder Path"
       },
       "tasks": {
         "title": "Tasks"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "Open Agents settings",
-          "retry": "Retry"
+          "retry": "Retry",
+          "relocateFolder": "Change Path"
         },
         "blocked": {
           "missingConfig": "Unable to read current Agent configuration.",
           "disabled": "{agent} is disabled in Agents settings. Enable it before connecting.",
           "unavailable": "{agent} is unavailable on the current platform.",
           "sdkMissing": "{agent} SDK is not installed",
-          "adapterMissing": "{agent}'s ACP adapter is not installed"
+          "adapterMissing": "{agent}'s ACP adapter is not installed",
+          "workingDirMissingTitle": "Folder deleted or moved",
+          "workingDirMissing": "Folder \"{path}\" no longer exists on disk. Change its path to continue."
         },
         "backendErrors": {
           "initializeTimeout": "{agent} connection handshake timed out after 60 seconds. Please open Settings to check Agent configuration and network settings.",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "Failed to clone repository"
+    },
+    "relocate": {
+      "title": "Change Folder Path",
+      "description": "Select the new directory for this project. All existing conversations will be preserved and can continue seamlessly.",
+      "currentPathLabel": "Previous path",
+      "historyPreservedNote": "Historical AI conversations remain viewable and resumable after updating the path.",
+      "confirm": "Update Path",
+      "relocatedToast": "Updated \"{name}\" path to {path}",
+      "errors": {
+        "invalidDir": "The selected path does not exist or is not a directory.",
+        "alreadyExists": "Another workspace folder is already using this path.",
+        "busy": "Finish or stop active agent turns in this folder before changing its path.",
+        "notFound": "This workspace folder could not be found."
+      }
     }
   },
   "ProjectBoot": {

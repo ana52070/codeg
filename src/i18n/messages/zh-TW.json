@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "輸入別名（留空清除）",
         "setAliasSave": "儲存",
         "setAliasCancel": "取消",
-        "removeFromWorkspace": "從工作區移除"
+        "removeFromWorkspace": "從工作區移除",
+        "relocatePath": "修改路徑…"
       },
       "manageConversations": {
         "title": "會話管理",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "助手",
       "timeGroupPrioritiesTooltip": "包含目前正在執行的任務",
       "recentGroupingModeTime": "切換為時間分組",
-      "recentGroupingModeFlat": "切換為平鋪列表"
+      "recentGroupingModeFlat": "切換為平鋪列表",
+      "missingFolderBadge": "磁碟上找不到此資料夾",
+      "missingFolderNotice": "資料夾已被刪除或更動",
+      "relocatePathAction": "修改路徑",
+      "removeFolderAction": "移除"
     },
     "conversation": {
       "reloadFailed": "會話重新載入失敗：{message}",
@@ -2446,7 +2451,9 @@
         "toolError": "錯誤",
         "turnFailed": "本輪失敗"
       },
-      "moreActions": "更多操作"
+      "moreActions": "更多操作",
+      "missingFolderBanner": "資料夾「{path}」已被刪除或更動。修改路徑後可保留全部歷史對話並繼續使用。",
+      "relocatePathAction": "修改路徑"
     },
     "sessionDetails": {
       "menuLabel": "對話詳情",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "重新連線會重啟智慧體，並中斷進行中的工作。",
         "reconnect": "重新連線",
         "reconnecting": "正在重新連線...",
-        "reconnectUnavailable": "目前沒有可重新連線的工作階段。"
+        "reconnectUnavailable": "目前沒有可重新連線的工作階段。",
+        "relocateFolder": "修改資料夾路徑"
       },
       "tasks": {
         "title": "任務"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "打開 Agents 管理",
-          "retry": "重試"
+          "retry": "重試",
+          "relocateFolder": "修改路徑"
         },
         "blocked": {
           "missingConfig": "無法讀取目前 Agent 設定。",
           "disabled": "{agent} 已在 Agents 管理中停用，請先啟用後再連線。",
           "unavailable": "{agent} 目前平台不可用。",
           "sdkMissing": "{agent} SDK 尚未安裝",
-          "adapterMissing": "{agent} 的 ACP 轉接器尚未安裝"
+          "adapterMissing": "{agent} 的 ACP 轉接器尚未安裝",
+          "workingDirMissingTitle": "資料夾已被刪除或更動",
+          "workingDirMissing": "資料夾「{path}」在磁碟上已不存在。修改路徑後可繼續使用。"
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 連線交握逾時（60 秒未回應），請前往設定頁面檢查智能體與網路設定。",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "複製儲存庫失敗"
+    },
+    "relocate": {
+      "title": "修改資料夾路徑",
+      "description": "選擇此專案的新目錄位置。所有現有對話紀錄都將保留，並可繼續對話。",
+      "currentPathLabel": "原路徑",
+      "historyPreservedNote": "修改路徑後，原有的 AI 對話紀錄仍可檢視並無縫繼續對話。",
+      "confirm": "確認修改",
+      "relocatedToast": "已將「{name}」的路徑更新為 {path}",
+      "errors": {
+        "invalidDir": "所選路徑不存在或不是有效的資料夾。",
+        "alreadyExists": "工作區中已有其他專案使用此路徑。",
+        "busy": "請先等待或停止此資料夾中正在進行的智能體對話，再修改路徑。",
+        "notFound": "找不到此工作區資料夾。"
+      }
     }
   },
   "ProjectBoot": {

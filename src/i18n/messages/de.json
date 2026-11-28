@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "Alias eingeben (zum Entfernen leer lassen)",
         "setAliasSave": "Speichern",
         "setAliasCancel": "Abbrechen",
-        "removeFromWorkspace": "Aus Arbeitsbereich entfernen"
+        "removeFromWorkspace": "Aus Arbeitsbereich entfernen",
+        "relocatePath": "Pfad ändern…"
       },
       "manageConversations": {
         "title": "Konversationen verwalten",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "Assistenten",
       "timeGroupPrioritiesTooltip": "Enthält aktuell laufende Sitzungen",
       "recentGroupingModeTime": "Zu Zeitgruppierung wechseln",
-      "recentGroupingModeFlat": "Zu flacher Liste wechseln"
+      "recentGroupingModeFlat": "Zu flacher Liste wechseln",
+      "missingFolderBadge": "Ordner auf dem Datenträger nicht gefunden",
+      "missingFolderNotice": "Ordner gelöscht oder verschoben",
+      "relocatePathAction": "Pfad ändern",
+      "removeFolderAction": "Entfernen"
     },
     "conversation": {
       "reloadFailed": "Konversation konnte nicht neu geladen werden: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "Fehler",
         "turnFailed": "Runde fehlgeschlagen"
       },
-      "moreActions": "Weitere Aktionen"
+      "moreActions": "Weitere Aktionen",
+      "missingFolderBanner": "Der Ordner „{path}“ wurde gelöscht oder verschoben. Aktualisiere den Pfad, um den gesamten Verlauf beizubehalten und weiterzuchatten.",
+      "relocatePathAction": "Pfad ändern"
     },
     "sessionDetails": {
       "menuLabel": "Sitzungsdetails",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "Neu verbinden startet den Agenten neu und unterbricht die laufende Arbeit.",
         "reconnect": "Neu verbinden",
         "reconnecting": "Verbinde neu...",
-        "reconnectUnavailable": "Noch keine Sitzung zum Neuverbinden."
+        "reconnectUnavailable": "Noch keine Sitzung zum Neuverbinden.",
+        "relocateFolder": "Ordnerpfad ändern"
       },
       "tasks": {
         "title": "Aufgaben"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "Agenten-Einstellungen öffnen",
-          "retry": "Erneut versuchen"
+          "retry": "Erneut versuchen",
+          "relocateFolder": "Pfad ändern"
         },
         "blocked": {
           "missingConfig": "Aktuelle Agenten-Konfiguration kann nicht gelesen werden.",
           "disabled": "{agent} ist in den Agenten-Einstellungen deaktiviert. Aktivieren Sie ihn vor dem Verbinden.",
           "unavailable": "{agent} ist auf der aktuellen Plattform nicht verfügbar.",
           "sdkMissing": "{agent} SDK ist nicht installiert",
-          "adapterMissing": "Der ACP-Adapter von {agent} ist nicht installiert"
+          "adapterMissing": "Der ACP-Adapter von {agent} ist nicht installiert",
+          "workingDirMissingTitle": "Ordner gelöscht oder verschoben",
+          "workingDirMissing": "Der Ordner „{path}“ existiert nicht mehr auf dem Datenträger. Ändere seinen Pfad, um fortzufahren."
         },
         "backendErrors": {
           "initializeTimeout": "Der Verbindungs-Handshake von {agent} hat nach 60 Sekunden das Zeitlimit überschritten. Öffnen Sie die Einstellungen, um Agenten- und Netzwerkkonfiguration zu prüfen.",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "Repository konnte nicht geklont werden"
+    },
+    "relocate": {
+      "title": "Ordnerpfad ändern",
+      "description": "Wähle das neue Verzeichnis für dieses Projekt aus. Alle vorhandenen Unterhaltungen bleiben erhalten und können nahtlos fortgesetzt werden.",
+      "currentPathLabel": "Vorheriger Pfad",
+      "historyPreservedNote": "Bisherige KI-Unterhaltungen bleiben nach dem Aktualisieren des Pfads sichtbar und fortsetzbar.",
+      "confirm": "Pfad aktualisieren",
+      "relocatedToast": "Pfad von „{name}“ auf {path} aktualisiert",
+      "errors": {
+        "invalidDir": "Der ausgewählte Pfad existiert nicht oder ist kein Verzeichnis.",
+        "alreadyExists": "Ein anderer Arbeitsbereichsordner verwendet diesen Pfad bereits.",
+        "busy": "Beende oder stoppe aktive Agenten-Antworten in diesem Ordner, bevor du den Pfad änderst.",
+        "notFound": "Dieser Arbeitsbereichsordner wurde nicht gefunden."
+      }
     }
   },
   "ProjectBoot": {

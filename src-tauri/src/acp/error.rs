@@ -50,6 +50,16 @@ pub enum AcpError {
     PlatformNotSupported(String),
     #[error("{0}")]
     SdkNotInstalled(String),
+    /// The workspace folder requested as `working_dir` does not exist on disk
+    /// (deleted, moved, or renamed). Rejected before spawning the agent process
+    /// so every agent reports a consistent, actionable error instead of
+    /// silently creating an empty folder or emitting disparate OS/ACP errors.
+    ///
+    /// INVARIANT: Keep the `"working directory does not exist: "` prefix
+    /// stable — both Tauri and HTTP/WS transports flatten `AcpError` via
+    /// `Display` on synchronous launch errors, and the frontend matches it.
+    #[error("working directory does not exist: {0}")]
+    WorkingDirMissing(String),
     #[error("Agent did not respond to Initialize within 60 seconds. The cached binary may be outdated or incompatible. Try upgrading it from Agent Settings.")]
     InitializeTimeout,
     #[error("Agent did not publish its configurable options within 60 seconds. The probe was aborted; the agent may be slow, idle, or not ACP-compliant — try again or check the agent binary.")]
@@ -147,6 +157,7 @@ impl AcpError {
         match self {
             Self::SdkNotInstalled(_) => Some("sdk_not_installed"),
             Self::PiProjectTrustRequired(_) => Some("pi_project_trust_required"),
+            Self::WorkingDirMissing(_) => Some("working_dir_missing"),
             Self::PlatformNotSupported(_) => Some("platform_not_supported"),
             Self::InitializeTimeout => Some("initialize_timeout"),
             Self::ProbeTimedOut => Some("probe_timed_out"),
@@ -254,6 +265,16 @@ mod tests {
                 r#"{"error":"boom","spawned_at":"2026-11-06T01:02:03Z"}"#
             )),
             r#"{"error":"boom"}"#
+        );
+    }
+
+    #[test]
+    fn working_dir_missing_exposes_stable_code_and_prefix() {
+        let err = AcpError::WorkingDirMissing("/tmp/gone-folder".to_string());
+        assert_eq!(err.code(), Some("working_dir_missing"));
+        assert_eq!(
+            err.to_string(),
+            "working directory does not exist: /tmp/gone-folder"
         );
     }
 }

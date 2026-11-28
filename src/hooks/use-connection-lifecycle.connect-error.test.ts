@@ -9,7 +9,7 @@
  * and the status chip show); the banner has to read it too.
  */
 
-import { renderHook } from "@testing-library/react"
+import { act, renderHook } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { ConnectErrorInfo } from "@/contexts/acp-connections-context"
 
@@ -34,11 +34,10 @@ vi.mock("@/contexts/task-context", () => {
 const conn = vi.hoisted(() => ({
   status: null as string | null,
   connectError: null as ConnectErrorInfo | null,
+  connect: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock("@/hooks/use-connection", () => {
-  // A parked request: the call resolves without saying how the request did.
-  const connect = vi.fn().mockResolvedValue(undefined)
   const noop = vi.fn().mockResolvedValue(undefined)
   return {
     useConnection: () => ({
@@ -47,7 +46,7 @@ vi.mock("@/hooks/use-connection", () => {
       connectError: conn.connectError,
       selectorsReady: false,
       hasCachedSelectors: false,
-      connect,
+      connect: conn.connect,
       disconnect: noop,
       sendPrompt: noop,
       setMode: noop,
@@ -67,14 +66,16 @@ vi.mock("@/hooks/use-connection", () => {
 
 import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
 
-function renderDraft() {
-  return renderHook(() =>
-    useConnectionLifecycle({
-      contextKey: "draft-tab",
-      agentType: "codex",
-      isActive: true,
-      workingDir: "/tmp/proj",
-    })
+function renderDraft(workingDir = "/tmp/proj") {
+  return renderHook(
+    ({ dir }: { dir: string }) =>
+      useConnectionLifecycle({
+        contextKey: "draft-tab",
+        agentType: "codex",
+        isActive: true,
+        workingDir: dir,
+      }),
+    { initialProps: { dir: workingDir } }
   )
 }
 
@@ -82,6 +83,7 @@ describe("useConnectionLifecycle autoConnectError", () => {
   beforeEach(() => {
     conn.status = null
     conn.connectError = null
+    conn.connect.mockReset().mockResolvedValue(undefined)
   })
 
   it("reports the published failure of a request that was parked", async () => {
@@ -132,5 +134,41 @@ describe("useConnectionLifecycle autoConnectError", () => {
     }
     const { result } = renderDraft()
     expect(result.current.autoConnectError).toBeNull()
+    expect(result.current.missingWorkingDir).toBeNull()
+  })
+
+  it("exposes missingWorkingDir while disconnected and reconnects when workingDir changes", async () => {
+    conn.connect.mockRejectedValueOnce(
+      new Error("working directory does not exist: /missing/proj")
+    )
+    conn.connectError = {
+      agentType: "codex",
+      title: "blocked.workingDirMissingTitle",
+      detail: "Working directory missing",
+      opensAgentSettings: false,
+      missingWorkingDir: "/missing/proj",
+    }
+
+    const { result, rerender } = renderDraft("/missing/proj")
+    await vi.waitFor(() => {
+      expect(result.current.missingWorkingDir).toBe("/missing/proj")
+      expect(result.current.autoConnectError).toBe("Working directory missing")
+    })
+
+    conn.connectError = null
+    await act(async () => {
+      rerender({ dir: "/relocated/proj" })
+    })
+
+    await vi.waitFor(() => {
+      expect(conn.connect).toHaveBeenCalledWith(
+        "codex",
+        "/relocated/proj",
+        undefined,
+        undefined
+      )
+      expect(result.current.missingWorkingDir).toBeNull()
+      expect(result.current.autoConnectError).toBeNull()
+    })
   })
 })

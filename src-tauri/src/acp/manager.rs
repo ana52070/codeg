@@ -1103,6 +1103,8 @@ impl ConnectionManager {
         // re-entrant: nothing reachable from here calls `spawn_agent` again.
         let _restore_guard = self.external_restore_lock.read().await;
 
+        crate::acp::connection::validate_working_dir_exists(working_dir.as_deref())?;
+
         // Connection dedup: when resuming an agent session (session_id is
         // Some), look for a live AgentConnection that already represents
         // the same external session in the same working_dir for the same
@@ -5348,6 +5350,63 @@ impl ConnectionManager {
                     })
                 }),
             };
+            if hit {
+                matched.push((id, lock));
+            }
+        }
+        matched.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut guards = Vec::with_capacity(matched.len());
+        let mut connection_ids = Vec::with_capacity(matched.len());
+        for (id, lock) in matched {
+            guards.push(lock.lock_owned().await);
+            connection_ids.push(id);
+        }
+        ConversationConnectionsLock {
+            connection_ids,
+            _guards: guards,
+        }
+    }
+
+    /// Take the prompt locks of every live connection operating on `folder_id`
+    /// or launched inside `folder_path`:
+    /// - bound directly to `folder_id`,
+    /// - bound to (or resuming an external session of) a conversation in `rows`,
+    /// - or launched with `working_dir` matching `folder_path` (covers unsent drafts).
+    ///
+    /// Locks are taken in connection-id order so concurrent operations cannot deadlock.
+    pub async fn lock_folder_connections(
+        &self,
+        folder_id: i32,
+        folder_path: &str,
+        rows: &[RelocatingConversation],
+    ) -> ConversationConnectionsLock {
+        let all: Vec<_> = {
+            let conns = self.connections.lock().await;
+            conns
+                .iter()
+                .map(|(id, conn)| {
+                    (
+                        id.clone(),
+                        conn.agent_type,
+                        conn.state.clone(),
+                        conn.prompt_lock.clone(),
+                    )
+                })
+                .collect()
+        };
+        let mut matched = Vec::new();
+        for (id, agent_type, state, lock) in all {
+            let s = state.read().await;
+            let hit = s.folder_id == Some(folder_id)
+                || match s.conversation_id {
+                    Some(cid) => rows.iter().any(|r| r.id == cid),
+                    None => s.external_id.as_deref().is_some_and(|eid| {
+                        rows.iter().any(|r| {
+                            r.agent_type == agent_type && r.external_id.as_deref() == Some(eid)
+                        })
+                    }),
+                }
+                || launch_dir_matches(s.working_dir.as_deref(), folder_path);
             if hit {
                 matched.push((id, lock));
             }

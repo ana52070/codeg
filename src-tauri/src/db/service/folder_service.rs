@@ -801,3 +801,240 @@ pub(crate) async fn assign_folder_positions(
 
     Ok(())
 }
+
+/// Result of [`relocate_folder_path`].
+#[derive(Debug)]
+pub enum RelocateFolderOutcome {
+    Relocated {
+        detail: Box<FolderDetail>,
+        old_path: String,
+        affected_conversation_ids: Vec<i32>,
+        updated_conversation_ids: Vec<i32>,
+    },
+    NotFound,
+    AlreadyExists,
+}
+
+/// Update an existing regular folder's disk `path` (and derived `name`) to
+/// `new_path` while preserving all folder metadata and backfilling `origin_cwd`
+/// on its live conversations so their existing transcripts remain readable and
+/// resumable.
+///
+/// Conflict policy:
+/// - If another **live** (`deleted_at IS NULL`) folder row matches `new_path`
+///   via [`crate::parsers::path_eq_for_matching`], aborts with
+///   [`RelocateFolderOutcome::AlreadyExists`].
+/// - If a **soft-deleted** (`deleted_at IS NOT NULL`) folder row matches
+///   `new_path`, clears any `parent_id` references to it and hard-deletes that
+///   tombstone inside the transaction before writing the new path.
+pub async fn relocate_folder_path(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+    new_path: &str,
+) -> Result<RelocateFolderOutcome, DbError> {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::TransactionTrait;
+
+    let txn = conn.begin().await?;
+
+    let Some(source) = folder::Entity::find_by_id(folder_id)
+        .filter(folder::Column::DeletedAt.is_null())
+        .one(&txn)
+        .await?
+    else {
+        return Ok(RelocateFolderOutcome::NotFound);
+    };
+
+    if source.kind != FolderKind::Regular {
+        return Ok(RelocateFolderOutcome::NotFound);
+    }
+
+    let old_path = source.path.clone();
+
+    if old_path == new_path {
+        return Ok(RelocateFolderOutcome::Relocated {
+            detail: Box::new(to_detail(source)),
+            old_path,
+            affected_conversation_ids: Vec::new(),
+            updated_conversation_ids: Vec::new(),
+        });
+    }
+
+    let others = folder::Entity::find()
+        .filter(folder::Column::Id.ne(folder_id))
+        .all(&txn)
+        .await?;
+
+    let mut tombstones = Vec::new();
+    for other in others {
+        if crate::parsers::path_eq_for_matching(&other.path, new_path) {
+            if other.deleted_at.is_none() {
+                txn.rollback().await?;
+                return Ok(RelocateFolderOutcome::AlreadyExists);
+            }
+            tombstones.push(other.id);
+        }
+    }
+
+    for tombstone_id in tombstones {
+        folder::Entity::update_many()
+            .col_expr(folder::Column::ParentId, Expr::value(None::<i32>))
+            .filter(folder::Column::ParentId.eq(tombstone_id))
+            .exec(&txn)
+            .await?;
+        folder::Entity::delete_by_id(tombstone_id)
+            .exec(&txn)
+            .await?;
+    }
+
+    let backfill = crate::db::service::conversation_service::backfill_origin_cwd_for_folder_in_txn(
+        &txn,
+        folder_id,
+        &old_path,
+        new_path,
+    )
+    .await?;
+
+    let mut active = source.into_active_model();
+    active.path = Set(new_path.to_string());
+    let name = std::path::Path::new(new_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| new_path.to_string());
+    active.name = Set(name);
+    active.git_branch = Set(None);
+    active.updated_at = Set(Utc::now());
+    let updated = active.update(&txn).await?;
+
+    txn.commit().await?;
+
+    Ok(RelocateFolderOutcome::Relocated {
+        detail: Box::new(to_detail(updated)),
+        old_path,
+        affected_conversation_ids: backfill.all_conversation_ids,
+        updated_conversation_ids: backfill.updated_conversation_ids,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::entities::conversation;
+    use crate::db::service::conversation_service;
+    use crate::db::test_helpers::fresh_in_memory_db;
+
+    #[tokio::test]
+    async fn relocate_updates_path_preserves_metadata_and_backfills_origin_cwd() {
+        let db = fresh_in_memory_db().await;
+        let entry = add_folder(&db.conn, "/tmp/codeg-relocate-old").await.unwrap();
+        update_folder_alias(&db.conn, entry.id, Some("My Project".to_string()))
+            .await
+            .unwrap();
+        update_folder_color(&db.conn, entry.id, "#ff0000")
+            .await
+            .unwrap();
+
+        let c1 = conversation_service::create(&db.conn, entry.id, AgentType::ClaudeCode, None, None)
+            .await
+            .unwrap();
+        let c2 = conversation_service::create(&db.conn, entry.id, AgentType::Codex, None, None)
+            .await
+            .unwrap();
+
+        let original_updated = conversation::Entity::find_by_id(c1.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap()
+            .updated_at;
+
+        let outcome = relocate_folder_path(&db.conn, entry.id, "/tmp/codeg-relocate-new")
+            .await
+            .unwrap();
+
+        match outcome {
+            RelocateFolderOutcome::Relocated {
+                detail,
+                old_path,
+                affected_conversation_ids,
+                updated_conversation_ids,
+            } => {
+                assert_eq!(old_path, "/tmp/codeg-relocate-old");
+                assert_eq!(detail.path, "/tmp/codeg-relocate-new");
+                assert_eq!(detail.name, "codeg-relocate-new");
+                assert_eq!(detail.alias.as_deref(), Some("My Project"));
+                assert_eq!(detail.color, "#ff0000");
+                assert_eq!(detail.git_branch, None);
+                assert_eq!(affected_conversation_ids.len(), 2);
+                assert_eq!(updated_conversation_ids.len(), 2);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let r1 = conversation::Entity::find_by_id(c1.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r1.origin_cwd.as_deref(), Some("/tmp/codeg-relocate-old"));
+        assert_eq!(r1.updated_at, original_updated);
+
+        let r2 = conversation::Entity::find_by_id(c2.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r2.origin_cwd.as_deref(), Some("/tmp/codeg-relocate-old"));
+
+        // Relocating a second time preserves the original origin_cwd; relocating
+        // back to the original path clears it.
+        let _ = relocate_folder_path(&db.conn, entry.id, "/tmp/codeg-relocate-third")
+            .await
+            .unwrap();
+        let r1_third = conversation::Entity::find_by_id(c1.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r1_third.origin_cwd.as_deref(), Some("/tmp/codeg-relocate-old"));
+
+        let _ = relocate_folder_path(&db.conn, entry.id, "/tmp/codeg-relocate-old")
+            .await
+            .unwrap();
+        let r1_home = conversation::Entity::find_by_id(c1.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r1_home.origin_cwd, None);
+    }
+
+    #[tokio::test]
+    async fn relocate_blocks_active_target_and_takes_over_soft_deleted_tombstone() {
+        let db = fresh_in_memory_db().await;
+        let src = add_folder(&db.conn, "/tmp/codeg-src").await.unwrap();
+        let live_other = add_folder(&db.conn, "/tmp/codeg-live").await.unwrap();
+        let tomb = add_folder(&db.conn, "/tmp/codeg-tomb").await.unwrap();
+        soft_delete_folder(&db.conn, tomb.id).await.unwrap();
+
+        let blocked = relocate_folder_path(&db.conn, src.id, &live_other.path)
+            .await
+            .unwrap();
+        assert!(matches!(blocked, RelocateFolderOutcome::AlreadyExists));
+
+        let taken_over = relocate_folder_path(&db.conn, src.id, &tomb.path)
+            .await
+            .unwrap();
+        assert!(matches!(
+            taken_over,
+            RelocateFolderOutcome::Relocated { ref detail, .. } if detail.id == src.id && detail.path == tomb.path
+        ));
+        assert!(folder::Entity::find_by_id(tomb.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+}

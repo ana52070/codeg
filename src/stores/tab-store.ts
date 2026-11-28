@@ -3364,6 +3364,78 @@ useAppWorkspaceStore.subscribe((next, previous) => {
   }
 })
 
+// Sync open tabs and pending draft retargets when a workspace folder's path is
+// relocated, so conversation/draft connections immediately reconnect at the new
+// directory and localStorage-persisted drafts carry the updated workingDir.
+useAppWorkspaceStore.subscribe((next, previous) => {
+  if (
+    next.allFolders === previous.allFolders &&
+    next.foldersHydrated === previous.foldersHydrated
+  ) {
+    return
+  }
+  const prevById = new Map(previous.allFolders.map((f) => [f.id, f]))
+  const changedPaths = new Map<number, string>()
+  const hydratedNow = next.foldersHydrated && !previous.foldersHydrated
+  const hydratedPaths = hydratedNow ? new Map<number, string>() : null
+  for (const f of next.allFolders) {
+    if (f.kind === "chat" || f.kind === "personal") continue
+    const prev = prevById.get(f.id)
+    if (prev && prev.path !== f.path) {
+      changedPaths.set(f.id, f.path)
+    }
+    if (hydratedPaths) {
+      hydratedPaths.set(f.id, f.path)
+    }
+  }
+  if (changedPaths.size === 0 && (!hydratedPaths || hydratedPaths.size === 0)) {
+    return
+  }
+
+  const st = useTabStore.getState()
+  let tabsChanged = false
+  const nextRawTabs = st.rawTabs.map((tab) => {
+    const relocatedPath = changedPaths.get(tab.folderId)
+    if (relocatedPath !== undefined && tab.workingDir !== relocatedPath) {
+      tabsChanged = true
+      return { ...tab, workingDir: relocatedPath }
+    }
+    if (
+      hydratedPaths &&
+      tab.conversationId == null &&
+      tab.isChat !== true &&
+      tab.folderId > 0
+    ) {
+      const folderPath = hydratedPaths.get(tab.folderId)
+      if (folderPath !== undefined && tab.workingDir !== folderPath) {
+        tabsChanged = true
+        return { ...tab, workingDir: folderPath }
+      }
+    }
+    return tab
+  })
+
+  let retargetsChanged = false
+  const nextRetargets = st.draftRetargetRequests.map((req) => {
+    const relocatedPath = changedPaths.get(req.folderId)
+    if (relocatedPath !== undefined && req.workingDir !== relocatedPath) {
+      retargetsChanged = true
+      return { ...req, workingDir: relocatedPath }
+    }
+    return req
+  })
+
+  if (!tabsChanged && !retargetsChanged) return
+  useTabStore.setState({
+    ...(tabsChanged ? { rawTabs: nextRawTabs } : {}),
+    ...(retargetsChanged ? { draftRetargetRequests: nextRetargets } : {}),
+  })
+  if (tabsChanged) {
+    recomputeTabs()
+    persistGroupState()
+  }
+})
+
 /** All tab actions as a shallow-stable object. Actions never change identity, so
  *  this hook never triggers a re-render — consumers that only dispatch use it
  *  instead of subscribing to any state slice. */

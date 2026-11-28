@@ -65,6 +65,7 @@ export interface UseConnectionLifecycleReturn {
   configOptionsLoading: boolean
   selectorsLoading: boolean
   autoConnectError: string | null
+  missingWorkingDir: string | null
   handleFocus: () => void
   handleSend: (
     draft: PromptDraft,
@@ -207,6 +208,7 @@ export function useConnectionLifecycle({
   const [lastAutoConnectError, setLastAutoConnectError] = useState<{
     contextKey: string
     agentType: AgentType
+    workingDir: string | undefined
     message: string
   } | null>(null)
 
@@ -301,6 +303,7 @@ export function useConnectionLifecycle({
           setLastAutoConnectError({
             contextKey: contextKeyRef.current,
             agentType,
+            workingDir,
             message: normalizeErrorMessage(e),
           })
         }
@@ -517,15 +520,22 @@ export function useConnectionLifecycle({
   // request would have rejected with.
   const publishedConnectError =
     conn.connectError?.agentType === agentType ? conn.connectError : null
+  const missingWorkingDir =
+    status === "connected" || status === "prompting"
+      ? null
+      : (publishedConnectError?.missingWorkingDir ?? null)
   const autoConnectError =
     status === "connected" || status === "prompting"
       ? null
-      : lastAutoConnectError?.contextKey === contextKey &&
-          lastAutoConnectError.agentType === agentType
-        ? lastAutoConnectError.message
-        : publishedConnectError
-          ? (publishedConnectError.detail ?? publishedConnectError.title)
-          : null
+      : publishedConnectError?.missingWorkingDir
+        ? (publishedConnectError.detail ?? publishedConnectError.title)
+        : lastAutoConnectError?.contextKey === contextKey &&
+            lastAutoConnectError.agentType === agentType &&
+            lastAutoConnectError.workingDir === workingDir
+          ? lastAutoConnectError.message
+          : publishedConnectError
+            ? (publishedConnectError.detail ?? publishedConnectError.title)
+            : null
 
   // sendPrompt, connCancel, connRespondPermission are stable (depend
   // only on actions + contextKey), so these callbacks are effectively stable.
@@ -656,6 +666,7 @@ export function useConnectionLifecycle({
     configOptionsLoading,
     selectorsLoading,
     autoConnectError,
+    missingWorkingDir,
     handleFocus,
     handleSend,
     handleSetConfigOption,

@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "Introduce un alias (déjalo vacío para borrarlo)",
         "setAliasSave": "Guardar",
         "setAliasCancel": "Cancelar",
-        "removeFromWorkspace": "Quitar del espacio de trabajo"
+        "removeFromWorkspace": "Quitar del espacio de trabajo",
+        "relocatePath": "Cambiar ruta…"
       },
       "manageConversations": {
         "title": "Gestionar conversaciones",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "Asistentes",
       "timeGroupPrioritiesTooltip": "Incluye sesiones actualmente en ejecución",
       "recentGroupingModeTime": "Cambiar a agrupación por fecha",
-      "recentGroupingModeFlat": "Cambiar a lista plana"
+      "recentGroupingModeFlat": "Cambiar a lista plana",
+      "missingFolderBadge": "Carpeta no encontrada en el disco",
+      "missingFolderNotice": "Carpeta eliminada o movida",
+      "relocatePathAction": "Cambiar ruta",
+      "removeFolderAction": "Quitar"
     },
     "conversation": {
       "reloadFailed": "No se pudo recargar la conversación: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "Error",
         "turnFailed": "Turno fallido"
       },
-      "moreActions": "Más acciones"
+      "moreActions": "Más acciones",
+      "missingFolderBanner": "La carpeta \"{path}\" ha sido eliminada o movida. Actualiza su ruta para seguir chateando conservando todo el historial.",
+      "relocatePathAction": "Cambiar ruta"
     },
     "sessionDetails": {
       "menuLabel": "Detalles de la sesión",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "Reconectar reinicia el agente e interrumpe el trabajo en curso.",
         "reconnect": "Reconectar",
         "reconnecting": "Reconectando...",
-        "reconnectUnavailable": "Aún no hay ninguna sesión a la que reconectar."
+        "reconnectUnavailable": "Aún no hay ninguna sesión a la que reconectar.",
+        "relocateFolder": "Cambiar ruta de la carpeta"
       },
       "tasks": {
         "title": "Tareas"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "Abrir ajustes de agentes",
-          "retry": "Reintentar"
+          "retry": "Reintentar",
+          "relocateFolder": "Cambiar ruta"
         },
         "blocked": {
           "missingConfig": "No se puede leer la configuración actual del agente.",
           "disabled": "{agent} está deshabilitado en Ajustes de agentes. Actívalo antes de conectar.",
           "unavailable": "{agent} no está disponible en la plataforma actual.",
           "sdkMissing": "El SDK de {agent} no está instalado",
-          "adapterMissing": "El adaptador ACP de {agent} no está instalado"
+          "adapterMissing": "El adaptador ACP de {agent} no está instalado",
+          "workingDirMissingTitle": "Carpeta eliminada o movida",
+          "workingDirMissing": "La carpeta \"{path}\" ya no existe en el disco. Cambia su ruta para continuar."
         },
         "backendErrors": {
           "initializeTimeout": "Se agotó el tiempo del handshake de conexión de {agent} (sin respuesta tras 60 segundos). Abre Ajustes para revisar la configuración del agente y de la red.",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "No se pudo clonar el repositorio"
+    },
+    "relocate": {
+      "title": "Cambiar ruta de la carpeta",
+      "description": "Selecciona el nuevo directorio para este proyecto. Se conservarán todas las conversaciones existentes y podrás continuarlas sin problemas.",
+      "currentPathLabel": "Ruta anterior",
+      "historyPreservedNote": "El historial de conversaciones con la IA seguirá siendo visible y reanudable después de actualizar la ruta.",
+      "confirm": "Actualizar ruta",
+      "relocatedToast": "Ruta de \"{name}\" actualizada a {path}",
+      "errors": {
+        "invalidDir": "La ruta seleccionada no existe o no es un directorio válido.",
+        "alreadyExists": "Otra carpeta del espacio de trabajo ya está usando esta ruta.",
+        "busy": "Finaliza o detén los turnos activos del agente en esta carpeta antes de cambiar su ruta.",
+        "notFound": "No se pudo encontrar esta carpeta del espacio de trabajo."
+      }
     }
   },
   "ProjectBoot": {

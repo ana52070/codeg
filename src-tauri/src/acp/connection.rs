@@ -2609,6 +2609,8 @@ pub async fn spawn_agent_connection(
     seed: SpawnSeed,
     selection: Option<Arc<crate::acp::selection::SelectionPersister>>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
+    validate_working_dir_exists(working_dir.as_deref())?;
+
     // Use the same cwd for launch settings, the subprocess and session/new.
     let launch_cwd = resolve_working_dir(working_dir.as_deref());
     // Create the authoritative session state up front. Subsequent emit_with_state
@@ -7067,6 +7069,21 @@ async fn emit_prompt_capabilities(
         },
     )
     .await;
+}
+
+/// Preflight `working_dir` when explicitly provided so launching an agent
+/// against a deleted/moved directory fails consistently with
+/// `AcpError::WorkingDirMissing` rather than letting some agents emit raw OS
+/// errors and others silently `mkdir -p` the stale directory.
+pub(crate) fn validate_working_dir_exists(working_dir: Option<&str>) -> Result<(), AcpError> {
+    let Some(dir) = working_dir.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let resolved = resolve_working_dir(Some(dir));
+    if !resolved.is_dir() {
+        return Err(AcpError::WorkingDirMissing(dir.to_string()));
+    }
+    Ok(())
 }
 
 fn resolve_working_dir(working_dir: Option<&str>) -> PathBuf {
@@ -55387,5 +55404,27 @@ mod trae_handshake_tests {
                 "{agent_type}"
             );
         }
+    }
+
+    #[test]
+    fn validate_working_dir_exists_allows_none_or_blank_and_existing_dir() {
+        assert!(validate_working_dir_exists(None).is_ok());
+        assert!(validate_working_dir_exists(Some("")).is_ok());
+        assert!(validate_working_dir_exists(Some("   ")).is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_working_dir_exists(Some(&dir.path().to_string_lossy())).is_ok());
+    }
+
+    #[test]
+    fn validate_working_dir_exists_rejects_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("deleted-folder");
+        let missing_str = missing.to_string_lossy().to_string();
+        let err = validate_working_dir_exists(Some(&missing_str)).unwrap_err();
+        assert_eq!(err.code(), Some("working_dir_missing"));
+        assert_eq!(
+            err.to_string(),
+            format!("working directory does not exist: {missing_str}")
+        );
     }
 }

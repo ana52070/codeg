@@ -43,6 +43,7 @@ import { getShellTransport, isDesktop } from "@/lib/transport"
 import { SearchCommandDialog } from "@/components/conversations/search-command-dialog"
 import { useVisibleConversationTabs } from "@/stores/tab-store"
 import { WorkspaceFolderDialog } from "@/components/layout/workspace-folder-dialog"
+import { RelocateFolderDialog } from "@/components/layout/relocate-folder-dialog"
 
 /**
  * Headless owner of the workspace's global keyboard shortcuts and the two
@@ -54,6 +55,12 @@ import { WorkspaceFolderDialog } from "@/components/layout/workspace-folder-dial
  */
 export function WorkspaceChromeController() {
   const { activeFolder } = useActiveFolder()
+  const relocateDialogFolderId = useAppWorkspaceStore(
+    (s) => s.relocateDialogFolderId
+  )
+  const closeRelocateFolderDialog = useAppWorkspaceStore(
+    (s) => s.closeRelocateFolderDialog
+  )
   const isChatMode = useIsActiveChatMode()
   const { toggle } = useSidebarContext()
   const { toggle: toggleAuxPanel } = useAuxPanelContext()
@@ -435,6 +442,12 @@ export function WorkspaceChromeController() {
     <>
       <SearchCommandDialog open={searchOpen} onOpenChange={setSearchOpen} />
       <WorkspaceFolderDialog open={browserOpen} onOpenChange={setBrowserOpen} />
+      <RelocateFolderDialog
+        folderId={relocateDialogFolderId}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) closeRelocateFolderDialog()
+        }}
+      />
     </>
   )
 }

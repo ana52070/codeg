@@ -1,13 +1,18 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import enMessages from "@/i18n/messages/en.json"
 import type {
   ConnectErrorInfo,
   ConnectionState,
 } from "@/contexts/acp-connections-context"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
+import type { FolderDetail } from "@/lib/types"
 
 const fake = vi.hoisted(() => {
   const state = {
@@ -102,6 +107,7 @@ function findAgentLabel(label: string) {
 describe("ComposerConnectionStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    resetAppWorkspaceStore()
     fake.state.conn = connected()
     fake.state.connectError = undefined
     fake.state.reconnectInfo = {
@@ -111,6 +117,10 @@ describe("ComposerConnectionStatus", () => {
     }
     fake.state.reconnect = vi.fn(async () => true)
     fake.state.reconnectedKeys = []
+  })
+
+  afterEach(() => {
+    resetAppWorkspaceStore()
   })
 
   it("keeps the status readable on the trigger before anything is clicked", () => {
@@ -231,6 +241,130 @@ describe("ComposerConnectionStatus", () => {
     )
     expect(fake.state.reconnectedKeys).toEqual(["tab-1"])
   })
+
+  it("offers to relocate the folder when a connect failed on a missing directory", async () => {
+    fake.state.conn = undefined
+    useAppWorkspaceStore.setState({
+      allFolders: [
+        {
+          id: 41,
+          name: "Repo",
+          path: "/missing/repo",
+          git_branch: null,
+          default_agent_type: null,
+          last_opened_at: "2026-01-01T00:00:00.000Z",
+          sort_order: 1,
+          color: "#000000",
+          parent_id: null,
+          kind: "regular",
+          alias: null,
+          group_id: null,
+        } as FolderDetail,
+      ],
+    })
+    fake.state.connectError = {
+      agentType: "codex",
+      title: "Folder does not exist",
+      detail: "The folder path was deleted or moved: /missing/repo",
+      opensAgentSettings: false,
+      missingWorkingDir: "/missing/repo",
+    }
+    const openByPath = vi.spyOn(
+      useAppWorkspaceStore.getState(),
+      "openRelocateFolderDialogByPath"
+    )
+
+    renderStatus()
+    await openPopover()
+
+    const relocateBtn = await screen.findByRole("button", {
+      name: copy.relocateFolder,
+    })
+    await userEvent.click(relocateBtn)
+    expect(openByPath).toHaveBeenCalledWith("/missing/repo")
+  })
+
+  it("opens relocate dialog by folder id when a matching missing folder is known", async () => {
+    fake.state.conn = undefined
+    fake.state.reconnectInfo = {
+      agentType: "claude_code",
+      workingDir: "D:\\Missing\\Repo",
+      sessionId: "sess-abc-123",
+    }
+    useAppWorkspaceStore.setState({
+      allFolders: [
+        {
+          id: 42,
+          name: "Repo",
+          path: "d:\\missing\\repo\\",
+          git_branch: null,
+          default_agent_type: null,
+          last_opened_at: "2026-01-01T00:00:00.000Z",
+          sort_order: 1,
+          color: "#000000",
+          parent_id: null,
+          kind: "regular",
+          alias: null,
+          group_id: null,
+        } as FolderDetail,
+      ],
+      missingFolderIds: new Set([42]),
+    })
+
+    renderStatus()
+    await openPopover()
+
+    const relocateBtn = await screen.findByRole("button", {
+      name: copy.relocateFolder,
+    })
+    await userEvent.click(relocateBtn)
+    expect(useAppWorkspaceStore.getState().relocateDialogFolderId).toBe(42)
+  })
+
+  it.each(["chat", "personal"] as const)(
+    "hides relocate folder button for non-regular (%s) folders",
+    async (kind) => {
+      fake.state.conn = undefined
+      fake.state.reconnectInfo = {
+        agentType: "claude_code",
+        workingDir: "/missing/non-regular",
+        sessionId: "sess-abc-123",
+      }
+      fake.state.connectError = {
+        agentType: "codex",
+        title: "Folder does not exist",
+        detail: "The folder path was deleted or moved: /missing/non-regular",
+        opensAgentSettings: false,
+        missingWorkingDir: "/missing/non-regular",
+      }
+      useAppWorkspaceStore.setState({
+        allFolders: [
+          {
+            id: 43,
+            name: kind === "chat" ? "Chat" : "Personal",
+            path: "/missing/non-regular",
+            git_branch: null,
+            default_agent_type: null,
+            last_opened_at: "2026-01-01T00:00:00.000Z",
+            sort_order: 1,
+            color: "#000000",
+            parent_id: null,
+            kind,
+            alias: null,
+            group_id: null,
+          } as FolderDetail,
+        ],
+        missingFolderIds: new Set([43]),
+      })
+
+      renderStatus()
+      await openPopover()
+
+      expect(
+        screen.queryByRole("button", { name: copy.relocateFolder })
+      ).not.toBeInTheDocument()
+    }
+  )
 
   it("lets a live entry's own state win over a stale connect failure", () => {
     fake.state.connectError = {

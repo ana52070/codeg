@@ -72,6 +72,17 @@ describe("routeAcpError", () => {
     expect(routeAcpError("process_exited").opensAgentSettings).toBeFalsy()
   })
 
+  it("offers to relocate a folder when its working directory is missing", () => {
+    const route = routeAcpError("working_dir_missing")
+    expect(route).toEqual({
+      kind: "session",
+      level: "error",
+      rawAsDetail: true,
+      opensRelocateFolder: true,
+    })
+    expect(acpErrorNotifiesDesktop(route)).toBe(true)
+  })
+
   it("carries the agent's account of an empty turn as the second line", () => {
     // The localized line only says the turn stopped; what the agent said (a
     // hook that blocked the prompt, …) would otherwise be lost.

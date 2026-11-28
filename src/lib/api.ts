@@ -2417,6 +2417,19 @@ export async function removeFolderFromWorkspace(
   return getTransport().call("remove_folder_from_workspace", { folderId })
 }
 
+export async function checkDirectoriesExist(
+  paths: string[]
+): Promise<Record<string, boolean>> {
+  return getTransport().call("check_directories_exist", { paths })
+}
+
+export async function relocateFolderPath(
+  folderId: number,
+  newPath: string
+): Promise<FolderDetail> {
+  return getTransport().call("relocate_folder_path", { folderId, newPath })
+}
+
 export async function listFolderGroups(): Promise<FolderGroupDetail[]> {
   return getTransport().call("list_folder_groups", {})
 }

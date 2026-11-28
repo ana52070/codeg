@@ -376,6 +376,14 @@ pub fn build_router_with_srn(
             post(handlers::folders::remove_folder_from_workspace),
         )
         .route(
+            "/check_directories_exist",
+            post(handlers::folders::check_directories_exist),
+        )
+        .route(
+            "/relocate_folder_path",
+            post(handlers::folders::relocate_folder_path),
+        )
+        .route(
             "/list_folder_groups",
             post(handlers::folders::list_folder_groups),
         )

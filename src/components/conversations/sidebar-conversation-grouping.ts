@@ -1180,10 +1180,17 @@ export interface WorkspaceEmptyRow {
   kind: "workspace-empty"
 }
 
+export interface MissingFolderNoticeRow {
+  kind: "missing-folder-notice"
+  folderId: number
+  depth: number
+}
+
 export type SidebarRow =
   | SectionHeaderRow
   | AssistantsRow
   | WorkspaceEmptyRow
+  | MissingFolderNoticeRow
   | FolderGroupHeaderRow
   | GroupEmptyRow
   | FolderHeaderRow
@@ -1436,6 +1443,8 @@ export function buildRows(args: {
    * (`"flat"`). See {@link classifyRecentConversation}.
    */
   recentGroupingMode?: SidebarRecentGroupingMode
+  /** Open folder ids missing on disk. Optional — omitted renders no notice rows. */
+  missingFolderIds?: ReadonlySet<number>
   /** The instant the time groups are measured from; only its local calendar
    *  day matters. Defaults to `Date.now()`. */
   currentTime?: number
@@ -1465,6 +1474,7 @@ export function buildRows(args: {
     hideEmptyFolders = false,
     assistants,
     recentGroupingMode = "time",
+    missingFolderIds = EMPTY_EXPANDED,
     currentTime = Date.now(),
   } = args
   const rows: SidebarRow[] = []
@@ -1540,7 +1550,16 @@ export function buildRows(args: {
       // Plain folder (or, under Show worktrees, a repo with no open worktrees):
       // header + its own bucket — the flat model.
       rows.push({ kind: "folder", folderId })
-      if (folderExpanded[folderId] ?? true) pushFolderBody(folderId, baseDepth)
+      if (folderExpanded[folderId] ?? true) {
+        if (missingFolderIds.has(folderId)) {
+          rows.push({
+            kind: "missing-folder-notice",
+            folderId,
+            depth: baseDepth,
+          })
+        }
+        pushFolderBody(folderId, baseDepth)
+      }
       return
     }
     // Container repo: its header gates the WHOLE subtree (root sub-group +
@@ -1548,6 +1567,13 @@ export function buildRows(args: {
     // only spans an expanded container.
     rows.push({ kind: "folder", folderId })
     if (!(folderExpanded[folderId] ?? true)) return
+    if (missingFolderIds.has(folderId)) {
+      rows.push({
+        kind: "missing-folder-notice",
+        folderId,
+        depth: baseDepth,
+      })
+    }
     // The repo's OWN sessions move into an indented "root" sub-group, first.
     if (!hideEmptyFolders || bucketHasRows(folderId)) {
       rows.push({ kind: "root-group", folderId })
@@ -1559,6 +1585,13 @@ export function buildRows(args: {
       if (hideEmptyFolders && !bucketHasRows(worktreeId)) continue
       rows.push({ kind: "folder", folderId: worktreeId })
       if (folderExpanded[worktreeId] ?? true) {
+        if (missingFolderIds.has(worktreeId)) {
+          rows.push({
+            kind: "missing-folder-notice",
+            folderId: worktreeId,
+            depth: baseDepth + 1,
+          })
+        }
         pushFolderBody(worktreeId, baseDepth + 1)
       }
     }

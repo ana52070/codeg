@@ -17,6 +17,7 @@ import { toast } from "sonner"
 import { Virtualizer, type VirtualizerHandle } from "virtua"
 import {
   Activity,
+  AlertTriangle,
   Bot,
   Calendar1,
   CalendarDays,
@@ -30,6 +31,7 @@ import {
   ExternalLink,
   FolderClosed,
   FolderGit2,
+  FolderInput,
   FolderOpen,
   FolderOpenDot,
   FolderRoot,
@@ -299,6 +301,8 @@ const FolderHeader = memo(function FolderHeader({
   rootBranch = null,
   scopeShownBelow = false,
   foldedScopes,
+  isMissing = false,
+  onRelocatePath,
 }: {
   folderId: number
   folderName: string
@@ -419,6 +423,8 @@ const FolderHeader = memo(function FolderHeader({
    * its own to show it. Must be referentially stable to preserve the memo.
    */
   foldedScopes?: readonly number[]
+  isMissing?: boolean
+  onRelocatePath?: (folderId: number) => void
 }) {
   // Own the translations here rather than receiving `t` as a prop: next-intl
   // returns a fresh `t` on every parent render, so passing it down would defeat
@@ -613,6 +619,18 @@ const FolderHeader = memo(function FolderHeader({
                       运行中"和"1 个在等你"并排显示像两件无关的事，而只有后者
                       需要用户动手。紫色，与卡片上的等待图标、状态点同一个色系，
                       和琥珀色的"忙碌"区分开；静态不闪，不做呼吸动画。 */}
+                  {isMissing ? (
+                    <span
+                      title={t("missingFolderBadge")}
+                      className="inline-flex shrink-0 items-center text-amber-600 dark:text-amber-400"
+                    >
+                      <AlertTriangle
+                        className="h-[0.8125rem] w-[0.8125rem]"
+                        aria-hidden
+                      />
+                      <span className="sr-only">{t("missingFolderBadge")}</span>
+                    </span>
+                  ) : null}
                   {awaitingCount > 0 ? (
                     <span
                       title={t("awaitingCountBadge", { count: awaitingCount })}
@@ -944,6 +962,12 @@ const FolderHeader = memo(function FolderHeader({
               </ContextMenuSubContent>
             </ContextMenuSub>
           )}
+          {onRelocatePath != null && (
+            <ContextMenuItem onSelect={() => onRelocatePath(folderId)}>
+              <FolderInput className="h-4 w-4" />
+              {t("folderHeaderMenu.relocatePath")}
+            </ContextMenuItem>
+          )}
           <ContextMenuSeparator />
           <ContextMenuItem
             variant="destructive"
@@ -1078,6 +1102,10 @@ export function SidebarConversationList({
   )
   const setFolderGroupAction = useAppWorkspaceStore((s) => s.setFolderGroup)
   const refreshFolder = useAppWorkspaceStore((s) => s.refreshFolder)
+  const missingFolderIds = useAppWorkspaceStore((s) => s.missingFolderIds)
+  const openRelocateFolderDialog = useAppWorkspaceStore(
+    (s) => s.openRelocateFolderDialog
+  )
   const refreshing = loading
   const { activeFolder } = useActiveFolder()
   // Which conversations are parked on the user (see `conversation-attention`).
@@ -1822,6 +1850,7 @@ export function SidebarConversationList({
         hideEmptyFolders: tagFilterActive,
         assistants: { expanded: assistantsExpanded, count: assistantsCount },
         recentGroupingMode,
+        missingFolderIds,
         currentTime: recentDayStart,
       }),
     [
@@ -1851,6 +1880,7 @@ export function SidebarConversationList({
       layout,
       folderGroupExpanded,
       tagFilterActive,
+      missingFolderIds,
     ]
   )
 
@@ -3264,6 +3294,8 @@ export function SidebarConversationList({
         }
         scopeShownBelow={scopeShownBelow}
         foldedScopes={foldedScopes}
+        isMissing={!isRootGroup && missingFolderIds.has(folderId)}
+        onRelocatePath={isRootGroup ? undefined : openRelocateFolderDialog}
       />
     )
   }
@@ -3417,6 +3449,40 @@ export function SidebarConversationList({
         grip: false,
         rootGroup: true,
       })
+    }
+    if (row.kind === "missing-folder-notice") {
+      const depth = row.depth
+      return (
+        <div
+          className="relative flex min-h-[2rem] items-center gap-1.5 pr-[0.5rem] text-[0.72rem] text-amber-700 dark:text-amber-300"
+          style={{
+            paddingLeft: `calc(var(--conv-rail-axis) + 0.875rem + ${depth} * ${CONV_RAIL_DEPTH_STEP})`,
+          }}
+        >
+          <SubsessionAncestorRails depth={depth} fullHeight />
+          <AlertTriangle
+            className="relative h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+            aria-hidden
+          />
+          <span className="relative min-w-0 flex-1 truncate">
+            {t("missingFolderNotice")}
+          </span>
+          <button
+            type="button"
+            onClick={() => openRelocateFolderDialog(row.folderId)}
+            className="relative shrink-0 cursor-pointer rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[0.6875rem] font-medium leading-none text-amber-800 transition-colors hover:bg-amber-500/20 dark:text-amber-200"
+          >
+            {t("relocatePathAction")}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleRemoveFolder(row.folderId)}
+            className="relative shrink-0 cursor-pointer rounded px-1 py-0.5 text-[0.6875rem] leading-none text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+          >
+            {t("removeFolderAction")}
+          </button>
+        </div>
+      )
     }
     if (row.kind === "empty") {
       // A worktree / root sub-group's empty hint is indented one level so its
@@ -3698,6 +3764,8 @@ export function SidebarConversationList({
     if (row.kind === "group-empty") return `groupempty-${row.groupId}`
     if (row.kind === "folder") return `folder-${row.folderId}`
     if (row.kind === "root-group") return `rootgroup-${row.folderId}`
+    if (row.kind === "missing-folder-notice")
+      return `missing-folder-${row.folderId}`
     if (row.kind === "empty") return `empty-${row.folderId}`
     if (row.kind === "chats-empty") return "chats-empty"
     if (row.kind === "folders-empty") return "folders-empty"

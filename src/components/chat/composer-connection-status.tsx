@@ -3,6 +3,7 @@
 import { useCallback, useState, useSyncExternalStore } from "react"
 import { getAgentLabel } from "@/lib/custom-agents"
 import {
+  FolderInput,
   HeartHandshake,
   HeartPulse,
   HeartCrack,
@@ -15,6 +16,10 @@ import {
   useAcpActions,
   useConnectionStore,
 } from "@/contexts/acp-connections-context"
+import {
+  isRelocatableFolder,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 import { AgentIcon } from "@/components/agent-icon"
 import { Button } from "@/components/ui/button"
 import {
@@ -24,6 +29,15 @@ import {
 } from "@/components/ui/popover"
 import { isConnectionBusy } from "@/lib/connection-teardown"
 import { cn } from "@/lib/utils"
+
+function normalizePathForMatch(raw: string): string {
+  const trimmed = raw.trim().replace(/[/\\]+$/, "")
+  const normalized = trimmed || raw.trim()
+  if (/^[a-zA-Z]:/.test(normalized) || normalized.includes("\\")) {
+    return normalized.toLowerCase()
+  }
+  return normalized
+}
 
 // Connection-only states. The session "prompting" state is intentionally
 // collapsed into "connected" (the connection stays up while the agent responds),
@@ -93,6 +107,8 @@ export function ComposerConnectionStatus({ tabId }: { tabId: string | null }) {
   const t = useTranslations("Folder.statusBar.connection")
   const store = useConnectionStore()
   const { reconnect, getReconnectInfo } = useAcpActions()
+  const allFolders = useAppWorkspaceStore((s) => s.allFolders)
+  const missingFolderIds = useAppWorkspaceStore((s) => s.missingFolderIds)
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState(false)
 
@@ -176,12 +192,36 @@ export function ComposerConnectionStatus({ tabId }: { tabId: string | null }) {
     ? getAgentLabel(detailAgentType)
     : null
   const detailStatusKey = toDetailStatus(status)
+  const missingWorkingDir = failedConnect?.missingWorkingDir ?? null
   const workingDir =
     conn?.workingDir ??
     connectPending?.workingDir ??
     reconnectInfo?.workingDir ??
+    missingWorkingDir ??
     null
   const sessionId = conn?.sessionId ?? reconnectInfo?.sessionId ?? null
+  const matchingMissingFolder =
+    workingDir && missingFolderIds.size > 0
+      ? allFolders.find(
+          (f) =>
+            isRelocatableFolder(f) &&
+            missingFolderIds.has(f.id) &&
+            normalizePathForMatch(f.path) === normalizePathForMatch(workingDir)
+        )
+      : undefined
+  const canRelocateMissingWorkingDir =
+    missingWorkingDir != null &&
+    allFolders.some(
+      (f) =>
+        isRelocatableFolder(f) &&
+        normalizePathForMatch(f.path) ===
+          normalizePathForMatch(missingWorkingDir)
+    )
+  const relocateTargetPath =
+    (canRelocateMissingWorkingDir ? missingWorkingDir : null) ??
+    matchingMissingFolder?.path ??
+    null
+
   // A reconnect on a busy OWNER kills the agent CLI and the work running in it;
   // a viewer's only detaches and re-attaches, leaving the owner's agent alone —
   // so only the former is worth warning about.
@@ -198,6 +238,16 @@ export function ComposerConnectionStatus({ tabId }: { tabId: string | null }) {
       })
       .finally(() => setPending(false))
   }, [reconnect, tabId])
+
+  const handleRelocateFolder = useCallback(() => {
+    setOpen(false)
+    const workspaceStore = useAppWorkspaceStore.getState()
+    if (matchingMissingFolder) {
+      workspaceStore.openRelocateFolderDialog(matchingMissingFolder.id)
+    } else if (relocateTargetPath) {
+      workspaceStore.openRelocateFolderDialogByPath(relocateTargetPath)
+    }
+  }, [matchingMissingFolder, relocateTargetPath])
 
   // The trigger keeps the native `title` (hover tooltip) it had as a plain span,
   // so the detail is still one hover away now that a click opens the popover.
@@ -266,6 +316,19 @@ export function ComposerConnectionStatus({ tabId }: { tabId: string | null }) {
           <p className="text-2xs leading-snug text-amber-600 dark:text-amber-500">
             {t("reconnectInterrupts")}
           </p>
+        ) : null}
+
+        {relocateTargetPath ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="secondary"
+            className="w-full"
+            onClick={handleRelocateFolder}
+          >
+            <FolderInput />
+            {t("relocateFolder")}
+          </Button>
         ) : null}
 
         <Button

@@ -51,6 +51,19 @@ export function AppWorkspaceProvider({ children }: AppWorkspaceProviderProps) {
     void refreshConversations()
   }, [])
 
+  // Re-probe folder directory existence when the window regains focus (a
+  // folder may have been deleted, renamed, or restored outside Codeg while the
+  // user was in Finder/Explorer/Terminal).
+  useEffect(() => {
+    const handleFocus = () => {
+      void useAppWorkspaceStore.getState().checkMissingFolders()
+    }
+    window.addEventListener("focus", handleFocus)
+    return () => {
+      window.removeEventListener("focus", handleFocus)
+    }
+  }, [])
+
   // Subscribe to the global `conversation://changed` side-channel so any
   // client's create/rename/delete/status reaches this client's sidebar in real
   // time — independent of whether the conversation is open/attached anywhere.

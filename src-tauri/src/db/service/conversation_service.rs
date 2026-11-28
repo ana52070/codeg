@@ -1527,6 +1527,75 @@ async fn collect_same_folder_subtree<C: sea_orm::ConnectionTrait>(
 /// Every non-empty `origin_cwd` a live conversation remembers. The chat
 /// scratch-dir GC keeps these: a chat conversation moved into a project still
 /// has its session — and whatever the agent wrote — in its old scratch dir.
+/// Outcome of backfilling `origin_cwd` for a folder whose on-disk path changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderOriginBackfill {
+    pub all_conversation_ids: Vec<i32>,
+    pub updated_conversation_ids: Vec<i32>,
+}
+
+/// Connection lookup keys `(conversation_id, agent_type, external_id)` for all
+/// live conversations belonging to `folder_id`.
+pub async fn list_folder_connection_keys(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+) -> Result<Vec<(i32, AgentType, Option<String>)>, DbError> {
+    let rows: Vec<(i32, String, Option<String>)> = conversation::Entity::find()
+        .select_only()
+        .column(conversation::Column::Id)
+        .column(conversation::Column::AgentType)
+        .column(conversation::Column::ExternalId)
+        .filter(conversation::Column::FolderId.eq(folder_id))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(conn)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, agent_type, external_id)| (id, parse_agent_type(&agent_type), external_id))
+        .collect())
+}
+
+/// Preserve original `origin_cwd` on every live conversation in `folder_id`
+/// inside `txn` when the folder itself moves from `old_path` to `new_path`.
+/// Does not bump `updated_at` ? relocating a missing folder is metadata repair,
+/// not conversation activity.
+pub async fn backfill_origin_cwd_for_folder_in_txn(
+    txn: &sea_orm::DatabaseTransaction,
+    folder_id: i32,
+    old_path: &str,
+    new_path: &str,
+) -> Result<FolderOriginBackfill, DbError> {
+    use sea_orm::sea_query::Expr;
+
+    let rows = conversation::Entity::find()
+        .filter(conversation::Column::FolderId.eq(folder_id))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .all(txn)
+        .await?;
+
+    let mut out = FolderOriginBackfill {
+        all_conversation_ids: Vec::with_capacity(rows.len()),
+        updated_conversation_ids: Vec::new(),
+    };
+
+    for row in rows {
+        out.all_conversation_ids.push(row.id);
+        let next_origin =
+            effective_origin_after_move(row.origin_cwd.as_deref(), old_path, new_path);
+        if next_origin != row.origin_cwd {
+            conversation::Entity::update_many()
+                .col_expr(conversation::Column::OriginCwd, Expr::value(next_origin))
+                .filter(conversation::Column::Id.eq(row.id))
+                .exec(txn)
+                .await?;
+            out.updated_conversation_ids.push(row.id);
+        }
+    }
+
+    Ok(out)
+}
+
 pub async fn list_live_origin_cwds(conn: &DatabaseConnection) -> Result<Vec<String>, DbError> {
     let rows: Vec<Option<String>> = conversation::Entity::find()
         .select_only()

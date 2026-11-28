@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "エイリアスを入力（空欄でクリア）",
         "setAliasSave": "保存",
         "setAliasCancel": "キャンセル",
-        "removeFromWorkspace": "ワークスペースから削除"
+        "removeFromWorkspace": "ワークスペースから削除",
+        "relocatePath": "パスを変更…"
       },
       "manageConversations": {
         "title": "会話の管理",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "アシスタント",
       "timeGroupPrioritiesTooltip": "現在実行中のセッションが含まれます",
       "recentGroupingModeTime": "時間グループ表示に切り替え",
-      "recentGroupingModeFlat": "フラットリストに切り替え"
+      "recentGroupingModeFlat": "フラットリストに切り替え",
+      "missingFolderBadge": "ディスク上にフォルダが見つかりません",
+      "missingFolderNotice": "フォルダが削除または移動されました",
+      "relocatePathAction": "パスを変更",
+      "removeFolderAction": "削除"
     },
     "conversation": {
       "reloadFailed": "会話の再読み込みに失敗しました: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "エラー",
         "turnFailed": "ターン失敗"
       },
-      "moreActions": "その他の操作"
+      "moreActions": "その他の操作",
+      "missingFolderBanner": "フォルダ「{path}」は削除または移動されました。パスを更新すると、すべての会話履歴を保持したまま会話を続けられます。",
+      "relocatePathAction": "パスを変更"
     },
     "sessionDetails": {
       "menuLabel": "セッション詳細",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "再接続するとエージェントが再起動し、進行中の処理が中断されます。",
         "reconnect": "再接続",
         "reconnecting": "再接続中...",
-        "reconnectUnavailable": "再接続できるセッションがまだありません。"
+        "reconnectUnavailable": "再接続できるセッションがまだありません。",
+        "relocateFolder": "フォルダパスを変更"
       },
       "tasks": {
         "title": "タスク"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "エージェント設定を開く",
-          "retry": "再試行"
+          "retry": "再試行",
+          "relocateFolder": "パスを変更"
         },
         "blocked": {
           "missingConfig": "現在のエージェント設定を読み取れません。",
           "disabled": "{agent} はエージェント設定で無効になっています。接続前に有効化してください。",
           "unavailable": "{agent} は現在のプラットフォームでは利用できません。",
           "sdkMissing": "{agent} SDK がインストールされていません",
-          "adapterMissing": "{agent} の ACP アダプターがインストールされていません"
+          "adapterMissing": "{agent} の ACP アダプターがインストールされていません",
+          "workingDirMissingTitle": "フォルダが削除または移動されました",
+          "workingDirMissing": "フォルダ「{path}」はディスク上に存在しません。続行するにはパスを変更してください。"
         },
         "backendErrors": {
           "initializeTimeout": "{agent} の接続ハンドシェイクがタイムアウトしました（60 秒以内に応答なし）。設定を開いてエージェントとネットワーク設定を確認してください。",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "リポジトリのクローンに失敗しました"
+    },
+    "relocate": {
+      "title": "フォルダパスを変更",
+      "description": "このプロジェクトの新しいディレクトリを選択してください。既存の会話履歴はすべて保持され、そのまま続行できます。",
+      "currentPathLabel": "変更前のパス",
+      "historyPreservedNote": "パスを更新した後も、過去の AI 会話履歴の閲覧および継続が可能です。",
+      "confirm": "パスを更新",
+      "relocatedToast": "「{name}」のパスを {path} に更新しました",
+      "errors": {
+        "invalidDir": "選択したパスが存在しないか、ディレクトリではありません。",
+        "alreadyExists": "ワークスペース内の別のフォルダがすでにこのパスを使用しています。",
+        "busy": "パスを変更する前に、このフォルダで実行中のエージェント応答を完了または停止してください。",
+        "notFound": "このワークスペースフォルダが見つかりません。"
+      }
     }
   },
   "ProjectBoot": {

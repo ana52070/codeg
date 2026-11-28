@@ -2,6 +2,7 @@ import { create } from "zustand"
 import { registerBackendScopedStoreReset } from "@/stores/backend-scoped-store-reset"
 import {
   applySidebarLayout as apiApplySidebarLayout,
+  checkDirectoriesExist as apiCheckDirectoriesExist,
   createFolderGroup as apiCreateFolderGroup,
   deleteFolderGroup as apiDeleteFolderGroup,
   getFolder as apiGetFolder,
@@ -13,6 +14,7 @@ import {
   openFolder as apiOpenFolder,
   openFolderById as apiOpenFolderById,
   openWorktreeFolder as apiOpenWorktreeFolder,
+  relocateFolderPath as apiRelocateFolderPath,
   removeFolderFromWorkspace as apiRemoveFolderFromWorkspace,
   setFolderGroup as apiSetFolderGroup,
   updateFolderGroup as apiUpdateFolderGroup,
@@ -33,6 +35,30 @@ import type {
   SidebarLayoutEntry,
 } from "@/lib/types"
 import type { FolderThemeColor } from "@/lib/theme-presets"
+
+export function isRelocatableFolder(
+  folder: Pick<FolderDetail, "kind">
+): boolean {
+  return folder.kind !== "chat" && folder.kind !== "personal"
+}
+
+function normalizePathForMatch(raw: string): string {
+  const trimmed = raw.trim().replace(/[/\\]+$/, "")
+  const normalized = trimmed || raw.trim()
+  // Windows drive-letter paths compare case-insensitively.
+  if (/^[a-zA-Z]:/.test(normalized) || normalized.includes("\\")) {
+    return normalized.toLowerCase()
+  }
+  return normalized
+}
+
+function setsEqual(a: ReadonlySet<number>, b: ReadonlySet<number>): boolean {
+  if (a.size !== b.size) return false
+  for (const v of a) {
+    if (!b.has(v)) return false
+  }
+  return true
+}
 
 /**
  * Workspace-level shared state (folders, conversations, branches) as a Zustand
@@ -56,6 +82,13 @@ export interface AppWorkspaceStoreState {
    * mistake an unknown folder list for deleted folders and prune drafts. */
   foldersHydrated: boolean
   foldersLoading: boolean
+  /**
+   * Regular open folder ids whose registered path currently does not exist on
+   * disk (deleted, moved, or unmounted). Updated by `checkMissingFolders`.
+   */
+  missingFolderIds: ReadonlySet<number>
+  /** Folder id currently open in `RelocateFolderDialog`, or null when closed. */
+  relocateDialogFolderId: number | null
 
   conversations: DbConversationSummary[]
   conversationsLoading: boolean
@@ -87,6 +120,12 @@ export interface AppWorkspaceStoreState {
   activeFolderId: number | null
 
   fetchFolders: () => Promise<void>
+  checkMissingFolders: () => Promise<void>
+  canRelocateFolderPath: (path: string) => boolean
+  openRelocateFolderDialog: (folderId: number) => void
+  openRelocateFolderDialogByPath: (path: string) => void
+  closeRelocateFolderDialog: () => void
+  relocateFolder: (folderId: number, newPath: string) => Promise<FolderDetail>
   refreshConversations: () => Promise<void>
   /**
    * Non-reactive by-id lookup for callbacks/effects. Render-time reads must
@@ -285,6 +324,7 @@ function forgetDeletedGroup(groupId: number): void {
 // completion would leave the sidebar showing the second-to-last order.
 let folderFetchSeq = 0
 let lastAppliedFolderFetch = 0
+let directoryCheckSeq = 0
 
 /**
  * Folders whose on-demand HEAD read is in flight (see `ensureGitHead`), each
@@ -331,6 +371,8 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
     folderGroups: [],
     foldersHydrated: false,
     foldersLoading: true,
+    missingFolderIds: new Set(),
+    relocateDialogFolderId: null,
 
     conversations: [],
     conversationsLoading: true,
@@ -392,11 +434,113 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
           branches,
           foldersHydrated: true,
         })
+        void get().checkMissingFolders()
       } catch (err) {
         console.error("[AppWorkspace] fetchFolders failed:", err)
       } finally {
         set({ foldersLoading: false })
       }
+    },
+
+    checkMissingFolders: async () => {
+      let checkDirectoriesExistFn: typeof apiCheckDirectoriesExist | undefined
+      try {
+        if (typeof apiCheckDirectoriesExist === "function") {
+          checkDirectoriesExistFn = apiCheckDirectoriesExist
+        }
+      } catch {
+        return
+      }
+      if (!checkDirectoriesExistFn) return
+      const candidates = get().folders.filter(
+        (f) =>
+          f.kind !== "chat" && f.kind !== "personal" && f.path.trim() !== ""
+      )
+      if (candidates.length === 0) {
+        if (get().missingFolderIds.size > 0) {
+          set({ missingFolderIds: new Set() })
+        }
+        return
+      }
+      const seq = ++directoryCheckSeq
+      const uniquePaths = Array.from(new Set(candidates.map((f) => f.path)))
+      try {
+        const existsMap = await checkDirectoriesExistFn(uniquePaths)
+        if (!existsMap || typeof existsMap !== "object") return
+        if (seq !== directoryCheckSeq) return
+        const nextMissing = new Set<number>()
+        for (const f of get().folders) {
+          if (f.kind === "chat" || f.kind === "personal") continue
+          if (existsMap[f.path] === false) {
+            nextMissing.add(f.id)
+          }
+        }
+        if (!setsEqual(get().missingFolderIds, nextMissing)) {
+          set({ missingFolderIds: nextMissing })
+        }
+      } catch (err) {
+        console.error("[AppWorkspace] checkMissingFolders failed:", err)
+      }
+    },
+
+    canRelocateFolderPath: (path) => {
+      const target = normalizePathForMatch(path)
+      if (!target) return false
+      const isEligible = (f: FolderDetail) =>
+        isRelocatableFolder(f) && normalizePathForMatch(f.path) === target
+      return get().folders.some(isEligible) || get().allFolders.some(isEligible)
+    },
+
+    openRelocateFolderDialog: (folderId) => {
+      const folder = get().allFolders.find((f) => f.id === folderId)
+      if (!folder || !isRelocatableFolder(folder)) {
+        return
+      }
+      set({ relocateDialogFolderId: folderId })
+    },
+
+    openRelocateFolderDialogByPath: (path) => {
+      const target = normalizePathForMatch(path)
+      if (!target) return
+      const isEligible = (f: FolderDetail) =>
+        isRelocatableFolder(f) && normalizePathForMatch(f.path) === target
+      const match =
+        get().folders.find(isEligible) ?? get().allFolders.find(isEligible)
+      if (match) {
+        set({ relocateDialogFolderId: match.id })
+      }
+    },
+
+    closeRelocateFolderDialog: () => {
+      if (get().relocateDialogFolderId !== null) {
+        set({ relocateDialogFolderId: null })
+      }
+    },
+
+    relocateFolder: async (folderId, newPath) => {
+      const detail = await apiRelocateFolderPath(folderId, newPath)
+      gitHeadInFlight.delete(folderId)
+      get().upsertFolder(detail)
+      const { missingFolderIds, gitHeads, branches } = get()
+      const patch: Partial<AppWorkspaceStoreState> = {}
+      if (missingFolderIds.has(folderId)) {
+        const nextMissing = new Set(missingFolderIds)
+        nextMissing.delete(folderId)
+        patch.missingFolderIds = nextMissing
+      }
+      if (gitHeads.has(folderId)) {
+        const nextHeads = new Map(gitHeads)
+        nextHeads.delete(folderId)
+        patch.gitHeads = nextHeads
+      }
+      const nextBranches = new Map(branches)
+      nextBranches.set(folderId, detail.git_branch ?? null)
+      patch.branches = nextBranches
+      set(patch)
+      void get().refreshConversations()
+      get().ensureGitHead(detail.id, detail.path)
+      void get().checkMissingFolders()
+      return detail
     },
 
     refreshConversations: async () => {
@@ -579,18 +723,40 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
         }
         return [...prev, detail]
       }
-      const { folders, allFolders } = get()
+      const { folders, allFolders, missingFolderIds, gitHeads } = get()
+      const previous =
+        allFolders.find((f) => f.id === detail.id) ??
+        folders.find((f) => f.id === detail.id)
+      const pathChanged = previous != null && previous.path !== detail.path
+      const patch: Partial<AppWorkspaceStoreState> = {
+        ...(detail.kind !== "chat" && detail.kind !== "personal"
+          ? { folders: upsert(folders) }
+          : {}),
+        allFolders: upsert(allFolders),
+      }
+      if (pathChanged) {
+        gitHeadInFlight.delete(detail.id)
+        if (gitHeads.has(detail.id)) {
+          const nextHeads = new Map(gitHeads)
+          nextHeads.delete(detail.id)
+          patch.gitHeads = nextHeads
+        }
+        if (missingFolderIds.has(detail.id)) {
+          const nextMissing = new Set(missingFolderIds)
+          nextMissing.delete(detail.id)
+          patch.missingFolderIds = nextMissing
+        }
+      }
       // Mirror the backend's list split: hidden chat folders are excluded from
       // `list_open_folder_details` (the user-facing `folders` list) but kept in
       // `list_all_folder_details` (`allFolders`, for by-id cwd / active-folder
       // lookups). Seeding a chat folder into `folders` would render a "Chat"
       // header row in the sidebar until the next refetch.
-      set({
-        ...(detail.kind !== "chat" && detail.kind !== "personal"
-          ? { folders: upsert(folders) }
-          : {}),
-        allFolders: upsert(allFolders),
-      })
+      set(patch)
+      if (pathChanged) {
+        get().ensureGitHead(detail.id, detail.path)
+        void get().checkMissingFolders()
+      }
     },
 
     applyFolderRemove: (folderId) => {
@@ -606,7 +772,14 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
       // itself no longer the owner and discards its answer instead of writing
       // the departed directory's branch onto the new one.
       gitHeadInFlight.delete(folderId)
-      const { folders, allFolders, branches, gitHeads } = get()
+      const {
+        folders,
+        allFolders,
+        branches,
+        gitHeads,
+        missingFolderIds,
+        relocateDialogFolderId,
+      } = get()
       const patch: Partial<AppWorkspaceStoreState> = {}
       if (folders.some((f) => f.id === folderId)) {
         patch.folders = folders.filter((f) => f.id !== folderId)
@@ -624,39 +797,71 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
         next.delete(folderId)
         patch.gitHeads = next
       }
+      if (missingFolderIds.has(folderId)) {
+        const next = new Set(missingFolderIds)
+        next.delete(folderId)
+        patch.missingFolderIds = next
+      }
+      if (relocateDialogFolderId === folderId) {
+        patch.relocateDialogFolderId = null
+      }
       if (Object.keys(patch).length > 0) set(patch)
     },
 
     openFolder: async (path) => {
       const detail = await apiOpenFolder(path)
-      const { upsertFolder, setBranch, refreshConversations } = get()
+      const {
+        upsertFolder,
+        setBranch,
+        refreshConversations,
+        checkMissingFolders,
+      } = get()
       upsertFolder(detail)
       setBranch(detail.id, detail.git_branch ?? null)
       void refreshConversations()
+      void checkMissingFolders()
       return detail
     },
 
     openWorktreeFolder: async (path, sourceFolderId) => {
       const detail = await apiOpenWorktreeFolder(path, sourceFolderId)
-      const { upsertFolder, setBranch, refreshConversations } = get()
+      const {
+        upsertFolder,
+        setBranch,
+        refreshConversations,
+        checkMissingFolders,
+      } = get()
       upsertFolder(detail)
       setBranch(detail.id, detail.git_branch ?? null)
       void refreshConversations()
+      void checkMissingFolders()
       return detail
     },
 
     addFolderToWorkspaceById: async (folderId) => {
       const detail = await apiOpenFolderById(folderId)
-      const { upsertFolder, setBranch, refreshConversations } = get()
+      const {
+        upsertFolder,
+        setBranch,
+        refreshConversations,
+        checkMissingFolders,
+      } = get()
       upsertFolder(detail)
       setBranch(detail.id, detail.git_branch ?? null)
       void refreshConversations()
+      void checkMissingFolders()
       return detail
     },
 
     removeFolderFromWorkspace: async (folderId) => {
       await apiRemoveFolderFromWorkspace(folderId)
-      const { folders, branches, refreshConversations } = get()
+      const {
+        folders,
+        branches,
+        missingFolderIds,
+        relocateDialogFolderId,
+        refreshConversations,
+      } = get()
       const patch: Partial<AppWorkspaceStoreState> = {
         folders: folders.filter((f) => f.id !== folderId),
       }
@@ -664,6 +869,14 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
         const next = new Map(branches)
         next.delete(folderId)
         patch.branches = next
+      }
+      if (missingFolderIds.has(folderId)) {
+        const next = new Set(missingFolderIds)
+        next.delete(folderId)
+        patch.missingFolderIds = next
+      }
+      if (relocateDialogFolderId === folderId) {
+        patch.relocateDialogFolderId = null
       }
       set(patch)
       void refreshConversations()
@@ -925,6 +1138,7 @@ export function resetAppWorkspaceStore() {
   folderMutationSeq = 0
   folderFetchSeq = 0
   lastAppliedFolderFetch = 0
+  directoryCheckSeq = 0
   useAppWorkspaceStore.setState(useAppWorkspaceStore.getInitialState(), true)
 }
 

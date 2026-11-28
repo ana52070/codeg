@@ -2021,6 +2021,8 @@ mod tauri_app {
                 folders::open_folder_by_id,
                 open_in::open_in_code,
                 folders::remove_folder_from_workspace,
+                folders::check_directories_exist,
+                folders::relocate_folder_path,
                 folders::list_folder_groups,
                 folders::create_folder_group,
                 folders::update_folder_group,

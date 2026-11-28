@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "输入别名（留空清除）",
         "setAliasSave": "保存",
         "setAliasCancel": "取消",
-        "removeFromWorkspace": "从工作区移除"
+        "removeFromWorkspace": "从工作区移除",
+        "relocatePath": "修改路径…"
       },
       "manageConversations": {
         "title": "会话管理",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "助手",
       "timeGroupPrioritiesTooltip": "包含当前正在执行的任务",
       "recentGroupingModeTime": "切换为时间分组",
-      "recentGroupingModeFlat": "切换为平铺列表"
+      "recentGroupingModeFlat": "切换为平铺列表",
+      "missingFolderBadge": "磁盘上找不到该文件夹",
+      "missingFolderNotice": "文件夹已被删除或改动",
+      "relocatePathAction": "修改路径",
+      "removeFolderAction": "移除"
     },
     "conversation": {
       "reloadFailed": "会话重新加载失败：{message}",
@@ -2446,7 +2451,9 @@
         "toolError": "错误",
         "turnFailed": "本轮失败"
       },
-      "moreActions": "更多操作"
+      "moreActions": "更多操作",
+      "missingFolderBanner": "文件夹「{path}」已被删除或改动。修改路径后可保留全部历史对话并继续使用。",
+      "relocatePathAction": "修改路径"
     },
     "sessionDetails": {
       "menuLabel": "会话详情",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "重连会重启智能体，并中断正在进行的工作。",
         "reconnect": "重新连接",
         "reconnecting": "正在重新连接...",
-        "reconnectUnavailable": "暂无可重连的会话。"
+        "reconnectUnavailable": "暂无可重连的会话。",
+        "relocateFolder": "修改文件夹路径"
       },
       "tasks": {
         "title": "任务"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "打开 Agents 管理",
-          "retry": "重试"
+          "retry": "重试",
+          "relocateFolder": "修改路径"
         },
         "blocked": {
           "missingConfig": "无法读取当前 Agent 配置。",
           "disabled": "{agent} 已在 Agents 管理中禁用，请先启用后再连接。",
           "unavailable": "{agent} 当前平台不可用。",
           "sdkMissing": "{agent} SDK 尚未安装",
-          "adapterMissing": "{agent} 的 ACP 适配器尚未安装"
+          "adapterMissing": "{agent} 的 ACP 适配器尚未安装",
+          "workingDirMissingTitle": "文件夹已被删除或改动",
+          "workingDirMissing": "文件夹「{path}」在磁盘上已不存在。修改路径后可继续使用。"
         },
         "backendErrors": {
           "initializeTimeout": "{agent} 连接握手超时（60 秒未响应），请前往设置页面检查智能体和网络配置。",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "克隆仓库失败"
+    },
+    "relocate": {
+      "title": "修改文件夹路径",
+      "description": "选择该项目的新目录位置。所有现有对话记录都将被保留，并可继续对话。",
+      "currentPathLabel": "原路径",
+      "historyPreservedNote": "修改路径后，原有 AI 对话记录仍可查看并无缝继续对话。",
+      "confirm": "确认修改",
+      "relocatedToast": "已将「{name}」的路径更新为 {path}",
+      "errors": {
+        "invalidDir": "所选路径不存在或不是有效的文件夹。",
+        "alreadyExists": "工作区中已有其他项目使用该路径。",
+        "busy": "请先等待或停止该文件夹中正在进行的智能体对话，再修改路径。",
+        "notFound": "找不到该工作区文件夹。"
+      }
     }
   },
   "ProjectBoot": {

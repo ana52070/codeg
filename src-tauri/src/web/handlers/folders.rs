@@ -161,6 +161,44 @@ pub async fn remove_folder_from_workspace(
     Ok(Json(()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckDirectoriesExistParams {
+    pub paths: Vec<String>,
+}
+
+pub async fn check_directories_exist(
+    Json(params): Json<CheckDirectoriesExistParams>,
+) -> Result<Json<std::collections::HashMap<String, bool>>, AppCommandError> {
+    Ok(Json(
+        folder_commands::check_directories_exist_core(params.paths).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocateFolderPathParams {
+    pub folder_id: i32,
+    pub new_path: String,
+}
+
+pub async fn relocate_folder_path(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<RelocateFolderPathParams>,
+) -> Result<Json<FolderDetail>, AppCommandError> {
+    Ok(Json(
+        folder_commands::relocate_folder_path_core(
+            &state.emitter,
+            &state.db,
+            &state.connection_manager,
+            params.folder_id,
+            params.new_path,
+        )
+        .await?,
+    ))
+}
+
+
 pub async fn list_folder_groups(
     Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<Vec<FolderGroupDetail>>, AppCommandError> {

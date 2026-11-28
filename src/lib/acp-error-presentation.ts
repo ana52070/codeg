@@ -39,6 +39,9 @@ export interface AcpErrorRoute {
   /** The fix lives in the agent's own settings panel (install, update,
    *  configure), so the notification offers to open it. */
   opensAgentSettings?: boolean
+  /** The working directory for this session is missing on disk, so the
+   *  notification offers to relocate the folder path. */
+  opensRelocateFolder?: boolean
 }
 
 const DEFAULT_ROUTE: AcpErrorRoute = {
@@ -56,6 +59,14 @@ const ROUTES: Readonly<Record<string, AcpErrorRoute>> = {
     level: "error",
     rawAsDetail: true,
     opensAgentSettings: true,
+  },
+  // The workspace directory no longer exists on disk (deleted, moved, or
+  // renamed). Offer to relocate the folder path directly from the alert.
+  working_dir_missing: {
+    kind: "session",
+    level: "error",
+    rawAsDetail: true,
+    opensRelocateFolder: true,
   },
   // The session could not be restored and the agent started a new one. It is
   // the session's state from here on — the agent no longer has the earlier

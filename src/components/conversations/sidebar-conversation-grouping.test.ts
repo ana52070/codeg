@@ -2222,3 +2222,77 @@ describe("buildRows Recent time grouping", () => {
     ])
   })
 })
+
+describe("buildRows missingFolderIds notices", () => {
+  const baseArgs = {
+    pinned: [],
+    pinnedExpanded: true,
+    byFolder: new Map<number, DbConversationSummary[]>(),
+    folderTotalCounts: new Map<number, number>(),
+    foldersExpanded: true,
+    chatConversations: [],
+    chatsExpanded: true,
+  }
+
+  it("emits missing-folder-notice under expanded plain folders and grouped folders", () => {
+    const rows = buildRows({
+      ...baseArgs,
+      orderedFolderIds: [10, 20],
+      folderExpanded: { 10: true, 20: true },
+      layout: {
+        top: [
+          { kind: "folder", id: 10 },
+          { kind: "group", id: 1 },
+        ],
+        membersByGroup: new Map([[1, [20]]]),
+      },
+      missingFolderIds: new Set([10, 20]),
+    })
+
+    expect(rows).toContainEqual({
+      kind: "missing-folder-notice",
+      folderId: 10,
+      depth: 0,
+    })
+    expect(rows).toContainEqual({
+      kind: "missing-folder-notice",
+      folderId: 20,
+      depth: 1,
+    })
+  })
+
+  it("omits missing-folder-notice when a folder is collapsed", () => {
+    const rows = buildRows({
+      ...baseArgs,
+      orderedFolderIds: [10],
+      folderExpanded: { 10: false },
+      missingFolderIds: new Set([10]),
+    })
+
+    expect(rows.some((r) => r.kind === "missing-folder-notice")).toBe(false)
+  })
+
+  it("emits notices for missing container repos and expanded worktree children", () => {
+    const rows = buildRows({
+      ...baseArgs,
+      orderedFolderIds: [10],
+      folderExpanded: { 10: true, 11: true, 12: false },
+      containerChildren: new Map([[10, [11, 12]]]),
+      missingFolderIds: new Set([10, 11, 12]),
+    })
+
+    expect(rows).toContainEqual({
+      kind: "missing-folder-notice",
+      folderId: 10,
+      depth: 0,
+    })
+    expect(rows).toContainEqual({
+      kind: "missing-folder-notice",
+      folderId: 11,
+      depth: 1,
+    })
+    expect(
+      rows.some((r) => r.kind === "missing-folder-notice" && r.folderId === 12)
+    ).toBe(false)
+  })
+})

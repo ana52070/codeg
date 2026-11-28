@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "أدخل اسمًا مستعارًا (اتركه فارغًا للمسح)",
         "setAliasSave": "حفظ",
         "setAliasCancel": "إلغاء",
-        "removeFromWorkspace": "إزالة من مساحة العمل"
+        "removeFromWorkspace": "إزالة من مساحة العمل",
+        "relocatePath": "تغيير المسار…"
       },
       "manageConversations": {
         "title": "إدارة المحادثات",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "المساعدون",
       "timeGroupPrioritiesTooltip": "يتضمن الجلسات قيد التشغيل حاليًا",
       "recentGroupingModeTime": "التبديل إلى التجميع حسب الوقت",
-      "recentGroupingModeFlat": "التبديل إلى قائمة بسيطة"
+      "recentGroupingModeFlat": "التبديل إلى قائمة بسيطة",
+      "missingFolderBadge": "المجلد غير موجود على القرص",
+      "missingFolderNotice": "تم حذف المجلد أو نقله",
+      "relocatePathAction": "تغيير المسار",
+      "removeFolderAction": "إزالة"
     },
     "conversation": {
       "reloadFailed": "فشل إعادة تحميل المحادثة: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "خطأ",
         "turnFailed": "فشلت الجولة"
       },
-      "moreActions": "إجراءات إضافية"
+      "moreActions": "إجراءات إضافية",
+      "missingFolderBanner": "تم حذف المجلد \"{path}\" أو نقله. حدّث مساره لمواصلة الدردشة مع الاحتفاظ بكامل سجل المحادثات.",
+      "relocatePathAction": "تغيير المسار"
     },
     "sessionDetails": {
       "menuLabel": "تفاصيل الجلسة",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "إعادة الاتصال تعيد تشغيل الوكيل وتقاطع العمل الجاري.",
         "reconnect": "إعادة الاتصال",
         "reconnecting": "جارٍ إعادة الاتصال...",
-        "reconnectUnavailable": "لا توجد جلسة لإعادة الاتصال بها بعد."
+        "reconnectUnavailable": "لا توجد جلسة لإعادة الاتصال بها بعد.",
+        "relocateFolder": "تغيير مسار المجلد"
       },
       "tasks": {
         "title": "المهام"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "فتح إعدادات الوكلاء",
-          "retry": "إعادة المحاولة"
+          "retry": "إعادة المحاولة",
+          "relocateFolder": "تغيير المسار"
         },
         "blocked": {
           "missingConfig": "تعذر قراءة إعدادات الوكيل الحالية.",
           "disabled": "{agent} معطّل في إعدادات الوكلاء. قم بتمكينه قبل الاتصال.",
           "unavailable": "{agent} غير متاح على المنصة الحالية.",
           "sdkMissing": "لم يتم تثبيت SDK الخاص بـ {agent}",
-          "adapterMissing": "محوّل ACP الخاص بـ {agent} غير مثبّت"
+          "adapterMissing": "محوّل ACP الخاص بـ {agent} غير مثبّت",
+          "workingDirMissingTitle": "تم حذف المجلد أو نقله",
+          "workingDirMissing": "المجلد \"{path}\" لم يعد موجودًا على القرص. غيّر مساره للمتابعة."
         },
         "backendErrors": {
           "initializeTimeout": "انتهت مهلة مصافحة اتصال {agent} (لا استجابة بعد 60 ثانية). افتح الإعدادات للتحقق من إعدادات الوكيل والشبكة.",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "فشل استنساخ المستودع"
+    },
+    "relocate": {
+      "title": "تغيير مسار المجلد",
+      "description": "اختر الدليل الجديد لهذا المشروع. سيتم الاحتفاظ بجميع المحادثات الحالية ويمكنك متابعتها بسلاسة.",
+      "currentPathLabel": "المسار السابق",
+      "historyPreservedNote": "تبقى سجلات محادثات الذكاء الاصطناعي قابلة للعرض والاستئناف بعد تحديث المسار.",
+      "confirm": "تحديث المسار",
+      "relocatedToast": "تم تحديث مسار \"{name}\" إلى {path}",
+      "errors": {
+        "invalidDir": "المسار المحدد غير موجود أو ليس مجلدًا صالحًا.",
+        "alreadyExists": "يوجد مجلد آخر في مساحة العمل يستخدم هذا المسار بالفعل.",
+        "busy": "يرجى إنهاء أو إيقاف مهام الوكيل النشطة في هذا المجلد قبل تغيير مساره.",
+        "notFound": "تعذر العثور على مجلد مساحة العمل هذا."
+      }
     }
   },
   "ProjectBoot": {

@@ -2319,7 +2319,8 @@
         "setAliasPlaceholder": "Insira um alias (deixe vazio para limpar)",
         "setAliasSave": "Salvar",
         "setAliasCancel": "Cancelar",
-        "removeFromWorkspace": "Remover do espaço de trabalho"
+        "removeFromWorkspace": "Remover do espaço de trabalho",
+        "relocatePath": "Alterar caminho…"
       },
       "manageConversations": {
         "title": "Gerenciar conversas",
@@ -2400,7 +2401,11 @@
       "sectionAssistants": "Assistentes",
       "timeGroupPrioritiesTooltip": "Inclui sessões atualmente em execução",
       "recentGroupingModeTime": "Mudar para agrupamento por data",
-      "recentGroupingModeFlat": "Mudar para lista simples"
+      "recentGroupingModeFlat": "Mudar para lista simples",
+      "missingFolderBadge": "Pasta ausente no disco",
+      "missingFolderNotice": "Pasta excluída ou movida",
+      "relocatePathAction": "Alterar caminho",
+      "removeFolderAction": "Remover"
     },
     "conversation": {
       "reloadFailed": "Falha ao recarregar conversa: {message}",
@@ -2446,7 +2451,9 @@
         "toolError": "Erro",
         "turnFailed": "Turno com falha"
       },
-      "moreActions": "Mais ações"
+      "moreActions": "Mais ações",
+      "missingFolderBanner": "A pasta \"{path}\" foi excluída ou movida. Atualize o caminho para continuar conversando mantendo todo o histórico.",
+      "relocatePathAction": "Alterar caminho"
     },
     "sessionDetails": {
       "menuLabel": "Detalhes da sessão",
@@ -2599,7 +2606,8 @@
         "reconnectInterrupts": "Reconectar reinicia o agente e interrompe o trabalho em andamento.",
         "reconnect": "Reconectar",
         "reconnecting": "Reconectando...",
-        "reconnectUnavailable": "Ainda não há sessão para reconectar."
+        "reconnectUnavailable": "Ainda não há sessão para reconectar.",
+        "relocateFolder": "Alterar caminho da pasta"
       },
       "tasks": {
         "title": "Tarefas"
@@ -3507,14 +3515,17 @@
       "acpConnections": {
         "actions": {
           "openAgentsSettings": "Abrir configurações de agentes",
-          "retry": "Tentar novamente"
+          "retry": "Tentar novamente",
+          "relocateFolder": "Alterar caminho"
         },
         "blocked": {
           "missingConfig": "Não foi possível ler a configuração atual do agente.",
           "disabled": "{agent} está desativado nas configurações de agentes. Ative-o antes de conectar.",
           "unavailable": "{agent} está indisponível na plataforma atual.",
           "sdkMissing": "O SDK de {agent} não está instalado",
-          "adapterMissing": "O adaptador ACP de {agent} não está instalado"
+          "adapterMissing": "O adaptador ACP de {agent} não está instalado",
+          "workingDirMissingTitle": "Pasta excluída ou movida",
+          "workingDirMissing": "A pasta \"{path}\" não existe mais no disco. Altere o caminho para continuar."
         },
         "backendErrors": {
           "initializeTimeout": "O handshake de conexão de {agent} expirou (sem resposta após 60 segundos). Abra Configurações para verificar a configuração do agente e da rede.",
@@ -4539,6 +4550,20 @@
     },
     "toasts": {
       "cloneFailed": "Falha ao clonar o repositório"
+    },
+    "relocate": {
+      "title": "Alterar caminho da pasta",
+      "description": "Selecione o novo diretório para este projeto. Todas as conversas existentes serão preservadas e poderão continuar normalmente.",
+      "currentPathLabel": "Caminho anterior",
+      "historyPreservedNote": "O histórico de conversas com a IA continua visível e retomável após atualizar o caminho.",
+      "confirm": "Atualizar caminho",
+      "relocatedToast": "Caminho de \"{name}\" atualizado para {path}",
+      "errors": {
+        "invalidDir": "O caminho selecionado não existe ou não é um diretório.",
+        "alreadyExists": "Outra pasta da área de trabalho já está usando este caminho.",
+        "busy": "Conclua ou interrompa os turnos ativos do agente nesta pasta antes de alterar o caminho.",
+        "notFound": "Não foi possível encontrar esta pasta da área de trabalho."
+      }
     }
   },
   "ProjectBoot": {

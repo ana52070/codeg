@@ -5264,6 +5264,107 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
     })
   })
 
+  it("offers to relocate a folder when session error reports working_dir_missing", async () => {
+    useAppWorkspaceStore.setState({
+      folders: [
+        {
+          id: 9,
+          name: "x",
+          path: "/tmp/x",
+          kind: "regular",
+        } as unknown as FolderDetail,
+      ],
+      allFolders: [
+        {
+          id: 9,
+          name: "x",
+          path: "/tmp/x",
+          kind: "regular",
+        } as unknown as FolderDetail,
+      ],
+    })
+    try {
+      await mountProvider()
+      await act(async () => {
+        await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+      })
+      const handlers = latestAttachHandlers()
+      h.toastError.mockClear()
+      h.recordAlert.mockClear()
+
+      const msg = "working directory does not exist: /tmp/x"
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "error",
+        message: msg,
+        agent_type: "claude_code",
+        code: "working_dir_missing",
+      })
+
+      expect(h.toastError).toHaveBeenCalledTimes(1)
+      const [title, options] = h.toastError.mock.calls[0] as [
+        string,
+        {
+          description?: string
+          action?: { label: string; onClick: () => void }
+        },
+      ]
+      expect(title).toBe("blocked.workingDirMissingTitle")
+      expect(options.description).toBe(msg)
+      expect(options.action?.label).toBe("actions.relocateFolder")
+      act(() => options.action!.onClick())
+      expect(useAppWorkspaceStore.getState().relocateDialogFolderId).toBe(9)
+    } finally {
+      resetAppWorkspaceStore()
+    }
+  })
+
+  it("omits relocate action when session error reports working_dir_missing for chat folder", async () => {
+    useAppWorkspaceStore.setState({
+      folders: [],
+      allFolders: [
+        {
+          id: 19,
+          name: "Chat",
+          path: "/tmp/chat-missing",
+          kind: "chat",
+        } as unknown as FolderDetail,
+      ],
+    })
+    try {
+      await mountProvider()
+      await act(async () => {
+        await h.actions!.connect(
+          TAB,
+          "claude_code",
+          "/tmp/chat-missing",
+          "sess-1"
+        )
+      })
+      const handlers = latestAttachHandlers()
+      h.toastError.mockClear()
+
+      emitAcpEvent(handlers, {
+        seq: 1,
+        connection_id: "spawned-conn",
+        type: "error",
+        message: "working directory does not exist: /tmp/chat-missing",
+        agent_type: "claude_code",
+        code: "working_dir_missing",
+      })
+
+      expect(h.toastError).toHaveBeenCalledTimes(1)
+      const [, options] = h.toastError.mock.calls[0] as [
+        string,
+        { action?: { label: string } },
+      ]
+      expect(options.action).toBeUndefined()
+    } finally {
+      resetAppWorkspaceStore()
+    }
+  })
+
   it("reports a rejected pick, and only when the backend says so", async () => {
     // The backend owns the request↔answer correlation (`ConfigOptionRejected`):
     // `acpSetConfigOption` resolves once the command is merely QUEUED, and the
@@ -9447,6 +9548,99 @@ describe("connect failures land on the surface that asked", () => {
       stale()
     })
     expect(h.acpConnect).not.toHaveBeenCalled()
+  })
+
+  it("records a missing working directory failure together with its relocate action", async () => {
+    const missingDir = "D:\\missing\\proj"
+    useAppWorkspaceStore.setState({
+      folders: [
+        {
+          id: 7,
+          name: "proj",
+          path: missingDir,
+          kind: "regular",
+        } as unknown as FolderDetail,
+      ],
+      allFolders: [
+        {
+          id: 7,
+          name: "proj",
+          path: missingDir,
+          kind: "regular",
+        } as unknown as FolderDetail,
+      ],
+    })
+    h.acpConnect.mockRejectedValueOnce(
+      new Error(`working directory does not exist: ${missingDir}`)
+    )
+    try {
+      await mountProvider()
+      await act(async () => {
+        await expect(
+          h.actions!.connect(TAB, "claude_code", missingDir, "sess-1")
+        ).rejects.toThrow("working directory does not exist")
+      })
+
+      expect(h.store!.getConnectError(TAB)).toEqual({
+        agentType: "claude_code",
+        title: "blocked.workingDirMissingTitle",
+        detail: "blocked.workingDirMissing",
+        opensAgentSettings: false,
+        missingWorkingDir: missingDir,
+      })
+
+      expect(h.toastError).toHaveBeenCalledTimes(1)
+      expect(h.toastError.mock.calls[0][0]).toBe(
+        "blocked.workingDirMissingTitle"
+      )
+      const options = toastOptions(h.toastError.mock.calls[0])
+      expect(options.action?.label).toBe("actions.relocateFolder")
+      expect(options.cancel?.label).toBe("actions.retry")
+      act(() => options.action!.onClick())
+      expect(useAppWorkspaceStore.getState().relocateDialogFolderId).toBe(7)
+
+      expect(h.recordAlert).toHaveBeenCalledTimes(1)
+      const alert = h.recordAlert.mock.calls[0][0]
+      expect(
+        alert.actions.map((action: { label: string }) => action.label)
+      ).toEqual(["actions.relocateFolder"])
+    } finally {
+      resetAppWorkspaceStore()
+    }
+  })
+
+  it("omits relocate action on connect failure for chat or personal folder", async () => {
+    const missingDir = "/data/chat-sessions/missing"
+    useAppWorkspaceStore.setState({
+      folders: [],
+      allFolders: [
+        {
+          id: 17,
+          name: "Chat",
+          path: missingDir,
+          kind: "chat",
+        } as unknown as FolderDetail,
+      ],
+    })
+    h.acpConnect.mockRejectedValueOnce(
+      new Error(`working directory does not exist: ${missingDir}`)
+    )
+    try {
+      await mountProvider()
+      await act(async () => {
+        await expect(
+          h.actions!.connect(TAB, "claude_code", missingDir, "sess-1")
+        ).rejects.toThrow("working directory does not exist")
+      })
+
+      const options = toastOptions(h.toastError.mock.calls[0])
+      expect(options.action?.label).toBe("actions.retry")
+      expect(options.cancel).toBeUndefined()
+      const alert = h.recordAlert.mock.calls[0][0]
+      expect(alert.actions).toBeUndefined()
+    } finally {
+      resetAppWorkspaceStore()
+    }
   })
 })
 
