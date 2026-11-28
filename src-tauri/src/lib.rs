@@ -2023,6 +2023,7 @@ mod tauri_app {
                 folders::remove_folder_from_workspace,
                 folders::check_directories_exist,
                 folders::relocate_folder_path,
+                folders::ensure_chat_folder_dir,
                 folders::list_folder_groups,
                 folders::create_folder_group,
                 folders::update_folder_group,

@@ -2430,6 +2430,12 @@ export async function relocateFolderPath(
   return getTransport().call("relocate_folder_path", { folderId, newPath })
 }
 
+export async function ensureChatFolderDir(
+  folderId: number
+): Promise<FolderDetail> {
+  return getTransport().call("ensure_chat_folder_dir", { folderId })
+}
+
 export async function listFolderGroups(): Promise<FolderGroupDetail[]> {
   return getTransport().call("list_folder_groups", {})
 }

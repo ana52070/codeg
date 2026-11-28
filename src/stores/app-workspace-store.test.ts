@@ -31,6 +31,7 @@ vi.mock("@/lib/api", () => ({
   setFolderGroup: vi.fn(),
   checkDirectoriesExist: vi.fn(async () => ({})),
   relocateFolderPath: vi.fn(),
+  ensureChatFolderDir: vi.fn(),
 }))
 
 const {
@@ -41,6 +42,7 @@ const {
   listFolderGroups: readFolderGroups,
   checkDirectoriesExist,
   relocateFolderPath,
+  ensureChatFolderDir,
   listAllConversations,
 } = await import("@/lib/api")
 const mockGetFolder = vi.mocked(getFolder)
@@ -50,6 +52,7 @@ const mockListOpenFolders = vi.mocked(listOpenFolderDetails)
 const mockListFolderGroups = vi.mocked(readFolderGroups)
 const mockCheckDirectoriesExist = vi.mocked(checkDirectoriesExist)
 const mockRelocateFolderPath = vi.mocked(relocateFolderPath)
+const mockEnsureChatFolderDir = vi.mocked(ensureChatFolderDir)
 const mockListAllConversations = vi.mocked(listAllConversations)
 
 function makeSummary(
@@ -915,6 +918,7 @@ describe("missing folders and relocation", () => {
   beforeEach(() => {
     mockCheckDirectoriesExist.mockReset().mockResolvedValue({})
     mockRelocateFolderPath.mockReset()
+    mockEnsureChatFolderDir.mockReset()
     mockGetGitHead.mockReset().mockResolvedValue({
       is_repo: false,
       branch: null,
@@ -1073,5 +1077,42 @@ describe("missing folders and relocation", () => {
     expect(st.canRelocateFolderPath("/chat/dir")).toBe(false)
     expect(st.canRelocateFolderPath("/personal/dir")).toBe(false)
     expect(st.canRelocateFolderPath("/unknown/dir")).toBe(false)
+  })
+
+  it("ensureChatFolderDir keeps state stable when unchanged and updates allFolders when healed", async () => {
+    const original = makeFolder({
+      id: 21,
+      name: "Chat",
+      path: "/data/chat-sessions/old",
+      kind: "chat",
+    })
+    useAppWorkspaceStore.setState({
+      folders: [],
+      allFolders: [original],
+    })
+
+    mockEnsureChatFolderDir.mockResolvedValueOnce(original)
+    const same = await useAppWorkspaceStore.getState().ensureChatFolderDir(21)
+    expect(same).toEqual(original)
+    expect(useAppWorkspaceStore.getState().allFolders[0]).toBe(original)
+    expect(mockListAllConversations).not.toHaveBeenCalled()
+
+    const healed = makeFolder({
+      id: 21,
+      name: "Chat",
+      path: "/data/chat-sessions/new",
+      kind: "chat",
+    })
+    mockEnsureChatFolderDir.mockResolvedValueOnce(healed)
+    mockListAllConversations.mockResolvedValueOnce([])
+    const updated = await useAppWorkspaceStore
+      .getState()
+      .ensureChatFolderDir(21)
+
+    expect(updated).toEqual(healed)
+    const st = useAppWorkspaceStore.getState()
+    expect(st.folders).toEqual([])
+    expect(st.allFolders).toEqual([healed])
+    expect(mockListAllConversations).toHaveBeenCalledTimes(1)
   })
 })

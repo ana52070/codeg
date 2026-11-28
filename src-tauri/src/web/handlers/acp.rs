@@ -108,6 +108,7 @@ pub async fn acp_connect(
     let connection_id = acp_commands::spawn_with_conversation_selection(
         manager,
         &db.conn,
+        &state.data_dir,
         params.agent_type,
         params.working_dir,
         params.session_id,

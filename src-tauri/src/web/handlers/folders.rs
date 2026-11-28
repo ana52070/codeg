@@ -199,6 +199,28 @@ pub async fn relocate_folder_path(
 }
 
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureChatFolderDirParams {
+    pub folder_id: i32,
+}
+
+pub async fn ensure_chat_folder_dir(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<EnsureChatFolderDirParams>,
+) -> Result<Json<FolderDetail>, AppCommandError> {
+    Ok(Json(
+        folder_commands::ensure_chat_folder_dir_core(
+            &state.emitter,
+            &state.db,
+            &state.connection_manager,
+            &state.data_dir,
+            params.folder_id,
+        )
+        .await?,
+    ))
+}
+
 pub async fn list_folder_groups(
     Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<Vec<FolderGroupDetail>>, AppCommandError> {

@@ -3379,12 +3379,12 @@ useAppWorkspaceStore.subscribe((next, previous) => {
   const hydratedNow = next.foldersHydrated && !previous.foldersHydrated
   const hydratedPaths = hydratedNow ? new Map<number, string>() : null
   for (const f of next.allFolders) {
-    if (f.kind === "chat" || f.kind === "personal") continue
+    if (f.kind === "personal") continue
     const prev = prevById.get(f.id)
     if (prev && prev.path !== f.path) {
       changedPaths.set(f.id, f.path)
     }
-    if (hydratedPaths) {
+    if (hydratedPaths && f.kind !== "chat") {
       hydratedPaths.set(f.id, f.path)
     }
   }

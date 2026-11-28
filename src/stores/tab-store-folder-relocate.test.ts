@@ -19,6 +19,7 @@ vi.mock("@/lib/api", () => ({
   })),
   listAllConversations: vi.fn(async () => []),
   relocateFolderPath: vi.fn(),
+  ensureChatFolderDir: vi.fn(),
   checkDirectoriesExist: vi.fn(async () => ({})),
 }))
 
@@ -27,8 +28,10 @@ vi.mock("@/lib/platform", () => ({
   onTransportReconnect: vi.fn(() => () => {}),
 }))
 
-const { relocateFolderPath, checkDirectoriesExist } = await import("@/lib/api")
+const { relocateFolderPath, ensureChatFolderDir, checkDirectoriesExist } =
+  await import("@/lib/api")
 const mockRelocateFolderPath = vi.mocked(relocateFolderPath)
+const mockEnsureChatFolderDir = vi.mocked(ensureChatFolderDir)
 const mockCheckDirectoriesExist = vi.mocked(checkDirectoriesExist)
 
 function makeFolder(
@@ -55,6 +58,7 @@ describe("tab-store syncs workingDir when a folder path is relocated", () => {
     resetTabStore()
     resetAppWorkspaceStore()
     mockRelocateFolderPath.mockReset()
+    mockEnsureChatFolderDir.mockReset()
     mockCheckDirectoriesExist.mockReset().mockResolvedValue({})
   })
 
@@ -216,5 +220,68 @@ describe("tab-store syncs workingDir when a folder path is relocated", () => {
     const rawTabs = useTabStore.getState().rawTabs
     expect(rawTabs[0]?.workingDir).toBe("/relocated/proj")
     expect(rawTabs[1]?.workingDir).toBeUndefined()
+  })
+
+  it("syncs open chat conversation tabs when ensureChatFolderDir heals a missing chat dir, while ignoring personal folders", async () => {
+    const chat = makeFolder({
+      id: 99,
+      name: "Chat",
+      path: "/data/chat-sessions/old",
+      kind: "chat",
+    })
+    const personal = makeFolder({
+      id: 100,
+      name: "Personal",
+      path: "/data/personal/old",
+      kind: "personal",
+    })
+    const healedChat = makeFolder({
+      id: 99,
+      name: "Chat",
+      path: "/data/chat-sessions/new",
+      kind: "chat",
+    })
+    mockEnsureChatFolderDir.mockResolvedValueOnce(healedChat)
+
+    useAppWorkspaceStore.setState({
+      folders: [],
+      allFolders: [chat, personal],
+      foldersHydrated: true,
+    })
+    useTabStore.setState({
+      rawTabs: [
+        {
+          id: "conv-99-claude_code-301",
+          kind: "conversation",
+          folderId: 99,
+          conversationId: 301,
+          agentType: "claude_code",
+          title: "Temp chat",
+          isPinned: true,
+          isChat: true,
+          workingDir: "/data/chat-sessions/old",
+        },
+        {
+          id: "conv-100-claude_code-302",
+          kind: "conversation",
+          folderId: 100,
+          conversationId: 302,
+          agentType: "claude_code",
+          title: "Personal",
+          isPinned: true,
+          workingDir: "/data/personal/old",
+        },
+      ],
+      activeTabId: "conv-99-claude_code-301",
+    })
+
+    await useAppWorkspaceStore.getState().ensureChatFolderDir(99)
+    useAppWorkspaceStore.setState({
+      allFolders: [healedChat, { ...personal, path: "/data/personal/new" }],
+    })
+
+    const rawTabs = useTabStore.getState().rawTabs
+    expect(rawTabs[0]?.workingDir).toBe("/data/chat-sessions/new")
+    expect(rawTabs[1]?.workingDir).toBe("/data/personal/old")
   })
 })

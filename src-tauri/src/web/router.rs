@@ -384,6 +384,10 @@ pub fn build_router_with_srn(
             post(handlers::folders::relocate_folder_path),
         )
         .route(
+            "/ensure_chat_folder_dir",
+            post(handlers::folders::ensure_chat_folder_dir),
+        )
+        .route(
             "/list_folder_groups",
             post(handlers::folders::list_folder_groups),
         )

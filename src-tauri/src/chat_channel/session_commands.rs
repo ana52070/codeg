@@ -892,6 +892,7 @@ pub async fn handle_resume(
     let connection_id = match crate::commands::acp::spawn_with_conversation_selection(
         conn_mgr,
         db,
+        data_dir,
         conv.agent_type,
         Some(folder.path.clone()),
         conv.external_id.clone(),
@@ -1544,6 +1545,7 @@ async fn spawn_chat_connection_for_conversation(
     let connection_id = crate::commands::acp::spawn_with_conversation_selection(
         conn_mgr,
         db,
+        data_dir,
         conv.agent_type,
         Some(folder.path.clone()),
         conv.external_id.clone(),
@@ -1556,6 +1558,15 @@ async fn spawn_chat_connection_for_conversation(
     )
     .await
     .map_err(|e| e.to_string())?;
+
+    let folder = if folder.kind == crate::db::entities::folder::FolderKind::Chat {
+        folder_service::get_folder_by_id(db, conv.folder_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(folder)
+    } else {
+        folder
+    };
 
     Ok((connection_id, folder))
 }

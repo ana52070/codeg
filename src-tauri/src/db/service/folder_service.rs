@@ -832,6 +832,27 @@ pub async fn relocate_folder_path(
     folder_id: i32,
     new_path: &str,
 ) -> Result<RelocateFolderOutcome, DbError> {
+    relocate_folder_path_inner(conn, folder_id, new_path, FolderKind::Regular, true).await
+}
+
+/// Update a hidden chat folder's scratch directory `path` while preserving its
+/// `"Chat"` sentinel name and backfilling `origin_cwd` on its live
+/// conversations so existing transcripts remain readable and resumable.
+pub async fn relocate_chat_folder_path(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+    new_path: &str,
+) -> Result<RelocateFolderOutcome, DbError> {
+    relocate_folder_path_inner(conn, folder_id, new_path, FolderKind::Chat, false).await
+}
+
+async fn relocate_folder_path_inner(
+    conn: &DatabaseConnection,
+    folder_id: i32,
+    new_path: &str,
+    expected_kind: FolderKind,
+    update_name_from_path: bool,
+) -> Result<RelocateFolderOutcome, DbError> {
     use sea_orm::sea_query::Expr;
     use sea_orm::TransactionTrait;
 
@@ -845,7 +866,7 @@ pub async fn relocate_folder_path(
         return Ok(RelocateFolderOutcome::NotFound);
     };
 
-    if source.kind != FolderKind::Regular {
+    if source.kind != expected_kind {
         return Ok(RelocateFolderOutcome::NotFound);
     }
 
@@ -897,12 +918,14 @@ pub async fn relocate_folder_path(
 
     let mut active = source.into_active_model();
     active.path = Set(new_path.to_string());
-    let name = std::path::Path::new(new_path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| new_path.to_string());
-    active.name = Set(name);
+    if update_name_from_path {
+        let name = std::path::Path::new(new_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| new_path.to_string());
+        active.name = Set(name);
+    }
     active.git_branch = Set(None);
     active.updated_at = Set(Utc::now());
     let updated = active.update(&txn).await?;
@@ -1037,4 +1060,79 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test]
+    async fn relocate_chat_folder_updates_path_preserves_chat_name_and_backfills_origin_cwd() {
+        let db = fresh_in_memory_db().await;
+        let chat_folder = add_chat_folder(&db.conn, "/tmp/chat-sessions/2026-11-26/aaa")
+            .await
+            .unwrap();
+        let conv = conversation_service::create_chat(
+            &db.conn,
+            chat_folder.id,
+            AgentType::ClaudeCode,
+            Some("Temp chat".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            relocate_folder_path(&db.conn, chat_folder.id, "/tmp/other")
+                .await
+                .unwrap(),
+            RelocateFolderOutcome::NotFound
+        ));
+
+        let outcome = relocate_chat_folder_path(
+            &db.conn,
+            chat_folder.id,
+            "/tmp/chat-sessions/2026-11-28/bbb",
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            RelocateFolderOutcome::Relocated {
+                detail,
+                old_path,
+                affected_conversation_ids,
+                updated_conversation_ids,
+            } => {
+                assert_eq!(old_path, "/tmp/chat-sessions/2026-11-26/aaa");
+                assert_eq!(detail.path, "/tmp/chat-sessions/2026-11-28/bbb");
+                assert_eq!(detail.name, "Chat");
+                assert_eq!(detail.kind, FolderKind::Chat);
+                assert_eq!(affected_conversation_ids, vec![conv.id]);
+                assert_eq!(updated_conversation_ids, vec![conv.id]);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let updated_conv = conversation::Entity::find_by_id(conv.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_conv.origin_cwd.as_deref(),
+            Some("/tmp/chat-sessions/2026-11-26/aaa")
+        );
+
+        let _ = relocate_chat_folder_path(
+            &db.conn,
+            chat_folder.id,
+            "/tmp/chat-sessions/2026-11-28/ccc",
+        )
+        .await
+        .unwrap();
+        let after_second = conversation::Entity::find_by_id(conv.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_second.origin_cwd.as_deref(),
+            Some("/tmp/chat-sessions/2026-11-26/aaa")
+        );
+    }
 }

@@ -12388,6 +12388,7 @@ async fn resolve_connect_selection_tx(
 pub(crate) async fn spawn_with_conversation_selection(
     manager: &ConnectionManager,
     db: &sea_orm::DatabaseConnection,
+    data_dir: &Path,
     agent_type: AgentType,
     working_dir: Option<String>,
     session_id: Option<String>,
@@ -12401,6 +12402,7 @@ pub(crate) async fn spawn_with_conversation_selection(
     let spawned = spawn_and_bind_conversation_selection(
         manager,
         db,
+        data_dir,
         agent_type,
         working_dir,
         session_id,
@@ -12432,10 +12434,61 @@ pub(crate) struct SpawnedConversationConnection {
 /// code, or `SessionLoadFailed` and its banner (a codex session another
 /// process holds is `session_busy`, with Reload). Refusing the id instead
 /// showed every such ending as a bare "connection not found".
+async fn recover_missing_chat_working_dir_if_needed(
+    manager: &ConnectionManager,
+    db: &sea_orm::DatabaseConnection,
+    data_dir: &Path,
+    emitter: &EventEmitter,
+    conversation_id: Option<i32>,
+    working_dir: Option<String>,
+) -> Result<Option<String>, AcpError> {
+    let Some(cid) = conversation_id else {
+        return Ok(working_dir);
+    };
+    let Some(ref raw_dir) = working_dir else {
+        return Ok(working_dir);
+    };
+    let trimmed = raw_dir.trim();
+    if trimmed.is_empty() {
+        return Ok(working_dir);
+    }
+    let dir_for_check = trimmed.to_string();
+    let exists = tokio::task::spawn_blocking(move || Path::new(&dir_for_check).is_dir())
+        .await
+        .unwrap_or(false);
+    if exists {
+        return Ok(working_dir);
+    }
+
+    let Ok(conv) = crate::db::service::conversation_service::get_by_id(db, cid).await else {
+        return Ok(working_dir);
+    };
+    let Ok(Some(folder)) =
+        crate::db::service::folder_service::get_folder_by_id(db, conv.folder_id).await
+    else {
+        return Ok(working_dir);
+    };
+    if folder.kind != crate::db::entities::folder::FolderKind::Chat {
+        return Ok(working_dir);
+    }
+
+    let recovered = crate::commands::folders::ensure_chat_folder_dir_with_conn(
+        emitter,
+        db,
+        manager,
+        data_dir,
+        folder.id,
+    )
+    .await
+    .map_err(|err| AcpError::protocol(err.message))?;
+    Ok(Some(recovered.path))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_and_bind_conversation_selection(
     manager: &ConnectionManager,
     db: &sea_orm::DatabaseConnection,
+    data_dir: &Path,
     agent_type: AgentType,
     working_dir: Option<String>,
     session_id: Option<String>,
@@ -12446,6 +12499,15 @@ pub(crate) async fn spawn_and_bind_conversation_selection(
     client_mode_id: Option<String>,
     client_config_values: BTreeMap<String, String>,
 ) -> Result<SpawnedConversationConnection, AcpError> {
+    let working_dir = recover_missing_chat_working_dir_if_needed(
+        manager,
+        db,
+        data_dir,
+        &emitter,
+        conversation_id,
+        working_dir,
+    )
+    .await?;
     let selection = resolve_connect_selection(
         db,
         manager,
@@ -12654,6 +12716,7 @@ pub async fn acp_connect(
     let spawned = spawn_and_bind_conversation_selection(
         &manager,
         &db.conn,
+        &app_data_dir,
         agent_type,
         working_dir,
         session_id,

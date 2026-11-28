@@ -102,6 +102,7 @@ import { leftChromeReserve, rightChromeReserve } from "@/lib/window-chrome"
 import {
   acpFork,
   acpStopAsyncTask,
+  checkDirectoriesExist,
   createChatConversation,
   createChatDir,
   createConversation,
@@ -304,9 +305,11 @@ const ConversationTabView = memo(function ConversationTabView({
     (s) => s.refreshConversations
   )
   const upsertFolder = useAppWorkspaceStore((s) => s.upsertFolder)
+  const ensureChatFolderDir = useAppWorkspaceStore((s) => s.ensureChatFolderDir)
   const canRelocateFolderPath = useAppWorkspaceStore(
     (s) => s.canRelocateFolderPath
   )
+  const foldersHydrated = useAppWorkspaceStore((s) => s.foldersHydrated)
   // Subscribe to ONLY this tab's own row (identified by `tabId`), not the whole
   // `tabs` array — so a sibling tab changing, or a tab-switch (isActive rides in
   // as a prop), never re-renders this keep-alive panel. `find` returns the same
@@ -484,6 +487,14 @@ const ConversationTabView = memo(function ConversationTabView({
   const createConversationPendingRef = useRef(false)
   // Single-flight guard for the eager scratch-dir prepare (on chat-mode select).
   const prepareChatDirPendingRef = useRef(false)
+  const [verifiedChatDraftDir, setVerifiedChatDraftDir] = useState<
+    string | null
+  >(null)
+  const [ensuredChatDir, setEnsuredChatDir] = useState<{
+    folderId: number
+    path: string
+  } | null>(null)
+  const ensureChatDirKeyRef = useRef<string | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const syncCancelRef = useRef<(() => void) | null>(null)
 
@@ -516,13 +527,30 @@ const ConversationTabView = memo(function ConversationTabView({
   // self-disarming: once workingDir lands the guard flips false. openChatModeTab
   // clears workingDir on re-entry, so a fresh dir is prepared each time.
   useEffect(() => {
-    if (!isActive || !isChatDraft || workingDir) return
+    if (!isActive || !isChatDraft) return
+    if (workingDir && verifiedChatDraftDir === workingDir) return
     if (prepareChatDirPendingRef.current) return
     prepareChatDirPendingRef.current = true
     void (async () => {
       try {
+        if (workingDir) {
+          let exists = true
+          try {
+            const existsMap = await checkDirectoriesExist([workingDir])
+            exists = existsMap?.[workingDir] !== false
+          } catch {
+            exists = true
+          }
+          if (exists) {
+            if (mountedRef.current) {
+              setVerifiedChatDraftDir(workingDir)
+            }
+            return
+          }
+        }
         const res = await createChatDir()
         if (mountedRef.current) {
+          setVerifiedChatDraftDir(res.path)
           setChatDraftWorkingDir(tabId, res.path)
         }
       } catch (e) {
@@ -543,9 +571,54 @@ const ConversationTabView = memo(function ConversationTabView({
     isActive,
     isChatDraft,
     workingDir,
+    verifiedChatDraftDir,
     tabId,
     setChatDraftWorkingDir,
     tWelcome,
+  ])
+
+  const isPersistedChatConversation =
+    hasPersistedConversation && folder?.kind === "chat"
+  useEffect(() => {
+    if (!isActive || !isPersistedChatConversation || !folder) return
+    if (
+      ensuredChatDir &&
+      ensuredChatDir.folderId === folder.id &&
+      ensuredChatDir.path === folder.path
+    ) {
+      return
+    }
+    const key = `${folder.id}:${folder.path}`
+    if (ensureChatDirKeyRef.current === key) return
+    ensureChatDirKeyRef.current = key
+    let cancelled = false
+    void ensureChatFolderDir(folder.id)
+      .then((detail) => {
+        if (!mountedRef.current || cancelled) return
+        setEnsuredChatDir({ folderId: detail.id, path: detail.path })
+      })
+      .catch((err) => {
+        console.error("[ConversationTabView] ensure chat dir:", err)
+        if (!mountedRef.current || cancelled) return
+        setEnsuredChatDir({ folderId: folder.id, path: folder.path })
+      })
+      .finally(() => {
+        if (ensureChatDirKeyRef.current === key) {
+          ensureChatDirKeyRef.current = null
+        }
+      })
+    return () => {
+      cancelled = true
+      if (ensureChatDirKeyRef.current === key) {
+        ensureChatDirKeyRef.current = null
+      }
+    }
+  }, [
+    isActive,
+    isPersistedChatConversation,
+    folder,
+    ensuredChatDir,
+    ensureChatFolderDir,
   ])
 
   // Sync the agentType prop into draftAgentType for draft tabs. The prop
@@ -685,9 +758,26 @@ const ConversationTabView = memo(function ConversationTabView({
       true,
     [acpAgents, selectedAgent]
   )
+  const awaitingChatDraftDir =
+    isChatDraft && (!workingDir || verifiedChatDraftDir !== workingDir)
+  const awaitingPersistedChatDir =
+    isPersistedChatConversation &&
+    folder != null &&
+    (ensuredChatDir == null ||
+      ensuredChatDir.folderId !== folder.id ||
+      ensuredChatDir.path !== folder.path)
+  const awaitingFoldersForChat =
+    hasPersistedConversation &&
+    ownTab?.isChat === true &&
+    !folder &&
+    !foldersHydrated
+  const awaitingChatWorkingDir =
+    awaitingChatDraftDir || awaitingPersistedChatDir || awaitingFoldersForChat
+
   const canAutoConnect =
     (hasPersistedConversation || (agentsLoaded && usableAgentCount > 0)) &&
     !awaitingHistoricalSessionId &&
+    !awaitingChatWorkingDir &&
     // Skip the doomed auto-connect for a not-installed agent ONLY in the draft
     // surfaces, where the persistent install banner explains it instead. A
     // persisted conversation keeps its existing connect-and-surface-the-error
@@ -744,7 +834,8 @@ const ConversationTabView = memo(function ConversationTabView({
     // composer and the status bar can show the conversation is opening instead
     // of an empty, connection-less composer. Scoped to the active tab — the
     // status bar is global.
-    preparing: isActive && awaitingHistoricalSessionId,
+    preparing:
+      isActive && (awaitingHistoricalSessionId || awaitingChatWorkingDir),
     // A cross-group move / unsplit reparents this view (React remounts it)
     // while the tab stays open — that unmount must not tear the connection
     // down. See `isReparentUnmount` for why "still open" alone is too broad.
@@ -902,17 +993,79 @@ const ConversationTabView = memo(function ConversationTabView({
   // actionable one and, unlike the connect-time toast, it's deterministic — it
   // appears the moment a not-installed agent is selected, independent of whether
   // a (deduped/superseded) connect attempt ever reached the preflight.
-  const missingFolderPath =
-    missingWorkingDir ??
-    (isFolderMissingOnDisk
-      ? (folder?.path ?? workingDirForConnection ?? null)
-      : null)
+  const missingFolderPath = awaitingChatWorkingDir
+    ? null
+    : (missingWorkingDir ??
+      (isFolderMissingOnDisk
+        ? (folder?.path ?? workingDirForConnection ?? null)
+        : null))
   const canRelocateMissingFolder =
     ownTab?.isChat !== true &&
     !isChatDraft &&
     (folder
       ? isRelocatableFolder(folder)
       : missingFolderPath != null && canRelocateFolderPath(missingFolderPath))
+
+  const recoveredMissingDraftDirRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!isActive || !isChatDraft) return
+    if (!missingWorkingDir || !workingDir || missingWorkingDir !== workingDir) {
+      return
+    }
+    if (recoveredMissingDraftDirRef.current === missingWorkingDir) return
+    recoveredMissingDraftDirRef.current = missingWorkingDir
+    if (prepareChatDirPendingRef.current) return
+    prepareChatDirPendingRef.current = true
+    void createChatDir()
+      .then((res) => {
+        if (!mountedRef.current) return
+        setVerifiedChatDraftDir(res.path)
+        setChatDraftWorkingDir(tabId, res.path)
+      })
+      .catch((e) => {
+        console.error("[ConversationTabView] recover chat draft dir:", e)
+      })
+      .finally(() => {
+        prepareChatDirPendingRef.current = false
+      })
+  }, [
+    isActive,
+    isChatDraft,
+    missingWorkingDir,
+    workingDir,
+    tabId,
+    setChatDraftWorkingDir,
+  ])
+
+  const recoveredMissingPersistedChatDirRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!isActive || !isPersistedChatConversation || !folder) return
+    if (
+      !missingWorkingDir ||
+      !workingDirForConnection ||
+      missingWorkingDir !== workingDirForConnection
+    ) {
+      return
+    }
+    if (recoveredMissingPersistedChatDirRef.current === missingWorkingDir)
+      return
+    recoveredMissingPersistedChatDirRef.current = missingWorkingDir
+    void ensureChatFolderDir(folder.id)
+      .then((detail) => {
+        if (!mountedRef.current) return
+        setEnsuredChatDir({ folderId: detail.id, path: detail.path })
+      })
+      .catch((err) => {
+        console.error("[ConversationTabView] recover chat dir:", err)
+      })
+  }, [
+    isActive,
+    isPersistedChatConversation,
+    folder,
+    missingWorkingDir,
+    workingDirForConnection,
+    ensureChatFolderDir,
+  ])
 
   const handleOpenRelocateFolder = useCallback(() => {
     const store = useAppWorkspaceStore.getState()

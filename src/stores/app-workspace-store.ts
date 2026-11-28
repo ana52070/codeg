@@ -14,6 +14,7 @@ import {
   openFolder as apiOpenFolder,
   openFolderById as apiOpenFolderById,
   openWorktreeFolder as apiOpenWorktreeFolder,
+  ensureChatFolderDir as apiEnsureChatFolderDir,
   relocateFolderPath as apiRelocateFolderPath,
   removeFolderFromWorkspace as apiRemoveFolderFromWorkspace,
   setFolderGroup as apiSetFolderGroup,
@@ -126,6 +127,7 @@ export interface AppWorkspaceStoreState {
   openRelocateFolderDialogByPath: (path: string) => void
   closeRelocateFolderDialog: () => void
   relocateFolder: (folderId: number, newPath: string) => Promise<FolderDetail>
+  ensureChatFolderDir: (folderId: number) => Promise<FolderDetail>
   refreshConversations: () => Promise<void>
   /**
    * Non-reactive by-id lookup for callbacks/effects. Render-time reads must
@@ -540,6 +542,16 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
       void get().refreshConversations()
       get().ensureGitHead(detail.id, detail.path)
       void get().checkMissingFolders()
+      return detail
+    },
+
+    ensureChatFolderDir: async (folderId) => {
+      const previous = get().allFolders.find((f) => f.id === folderId)
+      const detail = await apiEnsureChatFolderDir(folderId)
+      if (!previous || previous.path !== detail.path) {
+        get().upsertFolder(detail)
+        void get().refreshConversations()
+      }
       return detail
     },
 

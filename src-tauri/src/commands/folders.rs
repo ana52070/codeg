@@ -1206,6 +1206,153 @@ pub async fn relocate_folder_path_core(
     }
 }
 
+static CHAT_DIR_RECOVER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Ensure a temporary chat folder (`FolderKind::Chat`) has an existing scratch
+/// directory on disk. When its recorded `chat-sessions` directory was deleted,
+/// allocates a fresh directory under `<data_dir>/chat-sessions/<date>/<uuid>`,
+/// backfills `origin_cwd` on its live conversations, emits folder/conversation
+/// upserts, and returns the updated `FolderDetail`.
+pub(crate) async fn ensure_chat_folder_dir_with_conn(
+    emitter: &EventEmitter,
+    conn: &sea_orm::DatabaseConnection,
+    manager: &crate::acp::manager::ConnectionManager,
+    data_dir: &Path,
+    folder_id: i32,
+) -> Result<FolderDetail, AppCommandError> {
+    use crate::db::entities::folder::FolderKind;
+    use crate::db::service::conversation_service;
+    use crate::db::service::folder_service::RelocateFolderOutcome;
+
+    let existing = folder_service::get_folder_by_id(conn, folder_id)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| {
+            AppCommandError::not_found("Folder not found").with_i18n(
+                crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+                Default::default(),
+            )
+        })?;
+    if existing.kind != FolderKind::Chat {
+        return Err(AppCommandError::not_found("Folder not found").with_i18n(
+            crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+            Default::default(),
+        ));
+    }
+
+    let check_path = existing.path.clone();
+    let exists = tokio::task::spawn_blocking(move || Path::new(&check_path).is_dir())
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(format!("Directory check failed: {e}")))?;
+    if exists {
+        return Ok(existing);
+    }
+
+    let _recover_guard = CHAT_DIR_RECOVER_LOCK.lock().await;
+
+    let current = folder_service::get_folder_by_id(conn, folder_id)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| {
+            AppCommandError::not_found("Folder not found").with_i18n(
+                crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+                Default::default(),
+            )
+        })?;
+    if current.kind != FolderKind::Chat {
+        return Err(AppCommandError::not_found("Folder not found").with_i18n(
+            crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+            Default::default(),
+        ));
+    }
+    let current_path = current.path.clone();
+    let current_exists = tokio::task::spawn_blocking(move || Path::new(&current_path).is_dir())
+        .await
+        .map_err(|e| AppCommandError::task_execution_failed(format!("Directory check failed: {e}")))?;
+    if current_exists {
+        return Ok(current);
+    }
+
+    let conv_keys = conversation_service::list_folder_connection_keys(conn, folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    let relocating: Vec<crate::acp::manager::RelocatingConversation> = conv_keys
+        .into_iter()
+        .map(|(id, agent_type, external_id)| crate::acp::manager::RelocatingConversation {
+            id,
+            agent_type,
+            external_id,
+        })
+        .collect();
+
+    let lock = manager
+        .lock_folder_connections(folder_id, &current.path, &relocating)
+        .await;
+    if manager.busy_reason(&lock).await.is_some() {
+        drop(lock);
+        return Err(AppCommandError::task_execution_failed(
+            "Cannot change folder path while a conversation has an active turn",
+        )
+        .with_i18n(
+            crate::app_error::FOLDER_RELOCATE_I18N_KEY_BUSY,
+            Default::default(),
+        ));
+    }
+
+    let new_path = crate::commands::conversations::create_chat_dir_core(data_dir)?;
+    let outcome = folder_service::relocate_chat_folder_path(conn, folder_id, &new_path)
+        .await
+        .map_err(AppCommandError::from)?;
+
+    match outcome {
+        RelocateFolderOutcome::NotFound => {
+            drop(lock);
+            let _ = std::fs::remove_dir(&new_path);
+            Err(AppCommandError::not_found("Folder not found").with_i18n(
+                crate::app_error::FOLDER_RELOCATE_I18N_KEY_NOT_FOUND,
+                Default::default(),
+            ))
+        }
+        RelocateFolderOutcome::AlreadyExists => {
+            drop(lock);
+            let _ = std::fs::remove_dir(&new_path);
+            Err(
+                AppCommandError::already_exists("Target directory is already open in Codeg")
+                    .with_i18n(
+                        crate::app_error::FOLDER_RELOCATE_I18N_KEY_ALREADY_EXISTS,
+                        Default::default(),
+                    ),
+            )
+        }
+        RelocateFolderOutcome::Relocated {
+            detail,
+            affected_conversation_ids,
+            updated_conversation_ids,
+            ..
+        } => {
+            let detail = *detail;
+            manager.mark_relocated(&affected_conversation_ids);
+            manager.disconnect_locked(lock).await;
+            emit_folder_upsert(emitter, detail.clone());
+            for conv_id in updated_conversation_ids {
+                crate::commands::conversations::emit_conversation_upsert(emitter, conn, conv_id)
+                    .await;
+            }
+            Ok(detail)
+        }
+    }
+}
+
+pub async fn ensure_chat_folder_dir_core(
+    emitter: &EventEmitter,
+    db: &AppDatabase,
+    manager: &crate::acp::manager::ConnectionManager,
+    data_dir: &Path,
+    folder_id: i32,
+) -> Result<FolderDetail, AppCommandError> {
+    ensure_chat_folder_dir_with_conn(emitter, &db.conn, manager, data_dir, folder_id).await
+}
+
 // ---------------------------------------------------------------------------
 // Tauri command wrappers (thin shims over _core)
 // ---------------------------------------------------------------------------
@@ -1395,6 +1542,29 @@ pub async fn relocate_folder_path(
         &manager,
         folder_id,
         new_path,
+    )
+    .await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn ensure_chat_folder_dir(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, AppDatabase>,
+    manager: tauri::State<'_, crate::acp::manager::ConnectionManager>,
+    folder_id: i32,
+) -> Result<FolderDetail, AppCommandError> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map(|p| crate::paths::resolve_effective_data_dir(&p))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    ensure_chat_folder_dir_core(
+        &EventEmitter::from_app(&app),
+        &db,
+        &manager,
+        &data_dir,
+        folder_id,
     )
     .await
 }
@@ -10136,4 +10306,83 @@ mod workspace_confinement_tests {
         assert_eq!(fresh_conv.origin_cwd.as_deref(), Some(old_path.as_str()));
     }
 
+    #[tokio::test]
+    async fn ensure_chat_folder_dir_core_recovers_missing_dir_and_is_idempotent() {
+        use crate::acp::manager::ConnectionManager;
+        use crate::db::entities::folder::FolderKind;
+        use crate::db::service::conversation_service;
+        use crate::models::agent::AgentType;
+        use crate::web::event_bridge::{
+            EventEmitter, WebEventBroadcaster, CONVERSATION_CHANGED_EVENT, FOLDER_CHANGED_EVENT,
+        };
+
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("data_dir");
+        let created = crate::commands::conversations::create_chat_conversation_core(
+            &db.conn,
+            data_dir.path(),
+            AgentType::ClaudeCode,
+            Some("Chat title".to_string()),
+            None,
+        )
+        .await
+        .expect("create chat conversation");
+        let original_path = created.folder.path.clone();
+        assert!(Path::new(&original_path).is_dir());
+
+        let broadcaster = WebEventBroadcaster::new();
+        let mut rx = broadcaster.subscribe();
+        let emitter = EventEmitter::from_broadcaster(broadcaster);
+        let mgr = ConnectionManager::new();
+
+        // Fast path: when scratch dir exists, returns unchanged with zero events.
+        let same = ensure_chat_folder_dir_core(
+            &emitter,
+            &db,
+            &mgr,
+            data_dir.path(),
+            created.folder.id,
+        )
+        .await
+        .expect("idempotent ensure");
+        assert_eq!(same.path, original_path);
+        assert!(rx.try_recv().is_err());
+
+        // Delete the scratch dir on disk, then recover.
+        std::fs::remove_dir_all(&original_path).expect("delete scratch dir");
+        let recovered = ensure_chat_folder_dir_core(
+            &emitter,
+            &db,
+            &mgr,
+            data_dir.path(),
+            created.folder.id,
+        )
+        .await
+        .expect("recover missing chat dir");
+
+        assert_ne!(recovered.path, original_path);
+        assert!(Path::new(&recovered.path).is_dir());
+        assert_eq!(recovered.name, "Chat");
+        assert_eq!(recovered.kind, FolderKind::Chat);
+
+        let mut folder_events = 0;
+        let mut conv_events = 0;
+        while let Ok(evt) = rx.try_recv() {
+            match evt.channel.as_str() {
+                FOLDER_CHANGED_EVENT => folder_events += 1,
+                CONVERSATION_CHANGED_EVENT => conv_events += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(folder_events, 1);
+        assert_eq!(conv_events, 1);
+
+        let fresh_conv = conversation_service::get_by_id(&db.conn, created.conversation_id)
+            .await
+            .expect("conv");
+        assert_eq!(
+            fresh_conv.origin_cwd.as_deref(),
+            Some(original_path.as_str())
+        );
+    }
 }
